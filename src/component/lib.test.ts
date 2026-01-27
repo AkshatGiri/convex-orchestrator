@@ -218,4 +218,133 @@ describe("orchestrator component", () => {
 
     expect(claimed?.name).toEqual("workflow-a");
   });
+
+  test("claims workflows in FIFO order (oldest first)", async () => {
+    const t = initConvexTest();
+
+    // Create workflows in order with different inputs to identify them
+    const wf1 = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: { order: 1 },
+    });
+    const wf2 = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: { order: 2 },
+    });
+    const wf3 = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: { order: 3 },
+    });
+
+    // Claim first - should get oldest (wf1)
+    const claimed1 = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+    expect(claimed1?.workflowId).toEqual(wf1);
+    expect(claimed1?.input).toEqual({ order: 1 });
+
+    // Complete wf1 so we can claim next
+    await t.mutation(api.lib.completeWorkflow, {
+      workflowId: wf1,
+      workerId: "worker-1",
+      output: {},
+    });
+
+    // Claim second - should get wf2
+    const claimed2 = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+    expect(claimed2?.workflowId).toEqual(wf2);
+    expect(claimed2?.input).toEqual({ order: 2 });
+
+    // Complete wf2
+    await t.mutation(api.lib.completeWorkflow, {
+      workflowId: wf2,
+      workerId: "worker-1",
+      output: {},
+    });
+
+    // Claim third - should get wf3 (newest)
+    const claimed3 = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+    expect(claimed3?.workflowId).toEqual(wf3);
+    expect(claimed3?.input).toEqual({ order: 3 });
+  });
+
+  test("claims workflows in global FIFO order across different workflow types", async () => {
+    const t = initConvexTest();
+
+    // Create workflows of different types, interleaved
+    // Order: greet1, order1, greet2, order2
+    const greet1 = await t.mutation(api.lib.startWorkflow, {
+      name: "greet",
+      input: { order: 1 },
+    });
+    const order1 = await t.mutation(api.lib.startWorkflow, {
+      name: "order",
+      input: { order: 2 },
+    });
+    const greet2 = await t.mutation(api.lib.startWorkflow, {
+      name: "greet",
+      input: { order: 3 },
+    });
+    const order2 = await t.mutation(api.lib.startWorkflow, {
+      name: "order",
+      input: { order: 4 },
+    });
+
+    // Claim should return workflows in global creation order, not grouped by name
+    const claimed1 = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["greet", "order"],
+      workerId: "worker-1",
+    });
+    expect(claimed1?.workflowId).toEqual(greet1);
+    expect(claimed1?.name).toEqual("greet");
+
+    await t.mutation(api.lib.completeWorkflow, {
+      workflowId: greet1,
+      workerId: "worker-1",
+      output: {},
+    });
+
+    // Second should be order1 (created second globally)
+    const claimed2 = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["greet", "order"],
+      workerId: "worker-1",
+    });
+    expect(claimed2?.workflowId).toEqual(order1);
+    expect(claimed2?.name).toEqual("order");
+
+    await t.mutation(api.lib.completeWorkflow, {
+      workflowId: order1,
+      workerId: "worker-1",
+      output: {},
+    });
+
+    // Third should be greet2
+    const claimed3 = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["greet", "order"],
+      workerId: "worker-1",
+    });
+    expect(claimed3?.workflowId).toEqual(greet2);
+    expect(claimed3?.name).toEqual("greet");
+
+    await t.mutation(api.lib.completeWorkflow, {
+      workflowId: greet2,
+      workerId: "worker-1",
+      output: {},
+    });
+
+    // Fourth should be order2
+    const claimed4 = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["greet", "order"],
+      workerId: "worker-1",
+    });
+    expect(claimed4?.workflowId).toEqual(order2);
+    expect(claimed4?.name).toEqual("order");
+  });
 });

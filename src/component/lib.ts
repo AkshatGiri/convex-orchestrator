@@ -49,29 +49,41 @@ export const claimWorkflow = mutation({
     const now = Date.now();
     const leaseExpiresAt = now + CLAIM_TIMEOUT_MS;
 
-    // First, try to find a pending workflow
+    // First, try to find a pending workflow (oldest first - global FIFO across all names)
+    // Query each name and find the globally oldest pending workflow
+    let oldestPending: Awaited<ReturnType<typeof ctx.db.get>> | null = null;
+
     for (const name of args.workflowNames) {
       const pending = await ctx.db
         .query("workflows")
         .withIndex("name_status", (q) => q.eq("name", name).eq("status", "pending"))
+        .order("asc")
         .first();
 
       if (pending) {
-        await ctx.db.patch(pending._id, {
-          status: "running",
-          claimedBy: args.workerId,
-          claimedAt: now,
-          leaseExpiresAt,
-        });
-        return {
-          workflowId: pending._id,
-          name: pending.name,
-          input: pending.input,
-        };
+        if (!oldestPending || pending._creationTime < oldestPending._creationTime) {
+          oldestPending = pending;
+        }
       }
     }
 
-    // Check for abandoned workflows (claimed but timed out)
+    if (oldestPending) {
+      await ctx.db.patch(oldestPending._id, {
+        status: "running",
+        claimedBy: args.workerId,
+        claimedAt: now,
+        leaseExpiresAt,
+      });
+      return {
+        workflowId: oldestPending._id,
+        name: oldestPending.name,
+        input: oldestPending.input,
+      };
+    }
+
+    // Check for abandoned workflows (claimed but timed out) - oldest first globally
+    let oldestExpired: Awaited<ReturnType<typeof ctx.db.get>> | null = null;
+
     for (const name of args.workflowNames) {
       const expired = await ctx.db
         .query("workflows")
@@ -81,44 +93,63 @@ export const claimWorkflow = mutation({
             .eq("status", "running")
             .lt("leaseExpiresAt", now)
         )
+        .order("asc")
         .first();
 
       if (expired) {
-        await ctx.db.patch(expired._id, {
-          claimedBy: args.workerId,
-          claimedAt: now,
-          leaseExpiresAt,
-        });
-        return {
-          workflowId: expired._id,
-          name: expired.name,
-          input: expired.input,
-        };
+        if (!oldestExpired || expired._creationTime < oldestExpired._creationTime) {
+          oldestExpired = expired;
+        }
       }
+    }
 
-      // Back-compat: reclaim older running workflows missing leaseExpiresAt.
+    if (oldestExpired) {
+      await ctx.db.patch(oldestExpired._id, {
+        claimedBy: args.workerId,
+        claimedAt: now,
+        leaseExpiresAt,
+      });
+      return {
+        workflowId: oldestExpired._id,
+        name: oldestExpired.name,
+        input: oldestExpired.input,
+      };
+    }
+
+    // Back-compat: reclaim older running workflows missing leaseExpiresAt
+    let oldestLegacy: Awaited<ReturnType<typeof ctx.db.get>> | null = null;
+
+    for (const name of args.workflowNames) {
       const legacyRunning = await ctx.db
         .query("workflows")
         .withIndex("name_status", (q) => q.eq("name", name).eq("status", "running"))
+        .order("asc")
         .take(25);
+
       for (const workflow of legacyRunning) {
         if (
-          (workflow.leaseExpiresAt == null) &&
+          workflow.leaseExpiresAt == null &&
           workflow.claimedAt != null &&
           now - workflow.claimedAt > CLAIM_TIMEOUT_MS
         ) {
-          await ctx.db.patch(workflow._id, {
-            claimedBy: args.workerId,
-            claimedAt: now,
-            leaseExpiresAt,
-          });
-          return {
-            workflowId: workflow._id,
-            name: workflow.name,
-            input: workflow.input,
-          };
+          if (!oldestLegacy || workflow._creationTime < oldestLegacy._creationTime) {
+            oldestLegacy = workflow;
+          }
         }
       }
+    }
+
+    if (oldestLegacy) {
+      await ctx.db.patch(oldestLegacy._id, {
+        claimedBy: args.workerId,
+        claimedAt: now,
+        leaseExpiresAt,
+      });
+      return {
+        workflowId: oldestLegacy._id,
+        name: oldestLegacy.name,
+        input: oldestLegacy.input,
+      };
     }
 
     return null;
