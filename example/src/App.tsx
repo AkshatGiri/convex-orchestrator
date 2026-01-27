@@ -42,7 +42,7 @@ function WorkflowDashboard() {
   const startWorkflow = useMutation(api.example.startWorkflow);
   const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>("steps");
-  const [isStarting, setIsStarting] = useState(false);
+  const [startingWorkflow, setStartingWorkflow] = useState<string | null>(null);
 
   const steps = useQuery(
     api.example.getWorkflowSteps,
@@ -52,13 +52,13 @@ function WorkflowDashboard() {
   const selectedWorkflowData = workflows?.find((w) => w._id === selectedWorkflow);
 
   const handleStartWorkflow = async (name: string, input: any) => {
-    setIsStarting(true);
+    setStartingWorkflow(name);
     try {
       const id = await startWorkflow({ name, input });
       setSelectedWorkflow(id);
       setActiveTab("steps");
     } finally {
-      setIsStarting(false);
+      setStartingWorkflow(null);
     }
   };
 
@@ -98,16 +98,17 @@ function WorkflowDashboard() {
           <button
             className="btn btn-primary"
             onClick={handleStartGreet}
-            disabled={isStarting}
+            disabled={startingWorkflow !== null}
           >
-            {isStarting ? <span className="spinner" /> : null}
+            {startingWorkflow === "greet" ? <span className="spinner" /> : null}
             greet
           </button>
           <button
             className="btn btn-secondary"
             onClick={handleStartOrder}
-            disabled={isStarting}
+            disabled={startingWorkflow !== null}
           >
+            {startingWorkflow === "order" ? <span className="spinner" /> : null}
             order
           </button>
         </div>
