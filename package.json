@@ -31,10 +31,14 @@
     "test:coverage": "vitest run --coverage --coverage.reporter=text",
     "preversion": "npm install --no-package-lock && npm run build:clean && run-p test lint typecheck",
     "prepublishOnly": "npm whoami || npm login",
+    "prepare": "npm run build",
     "prepack": "npm run build",
-    "alpha": "npm version prerelease --preid alpha && npm publish --tag alpha && git push --follow-tags",
-    "release": "npm version patch && npm publish && git push --follow-tags",
+    "alpha": "npm version prerelease --preid alpha && npm publish --tag alpha --access public && git push --follow-tags",
+    "release": "npm version patch && npm publish --access public && git push --follow-tags",
     "version": "vim -c 'normal o' -c 'normal o## '$npm_package_version CHANGELOG.md && prettier -w CHANGELOG.md && git add CHANGELOG.md"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "dist",
