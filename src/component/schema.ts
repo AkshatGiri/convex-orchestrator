@@ -30,6 +30,7 @@ export default defineSchema({
     stepIdsByName: v.optional(v.record(v.string(), v.id("steps"))),
   })
     .index("status", ["status"])
+    .index("status_leaseExpiresAt", ["status", "leaseExpiresAt"])
     .index("name_status", ["name", "status"])
     .index("name_status_leaseExpiresAt", ["name", "status", "leaseExpiresAt"]),
 

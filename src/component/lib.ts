@@ -4,6 +4,7 @@ import { workflowStatus, stepStatus } from "./schema.js";
 
 // How long before a claimed workflow is considered abandoned (30 seconds)
 const CLAIM_TIMEOUT_MS = 30_000;
+const ALL_WORKFLOWS = "*";
 
 // ============================================================================
 // Workflow Management
@@ -49,7 +50,81 @@ export const claimWorkflow = mutation({
     const now = Date.now();
     const leaseExpiresAt = now + CLAIM_TIMEOUT_MS;
 
-    // First, try to find a pending workflow (oldest first - global FIFO across all names)
+    const claimAll = args.workflowNames.includes(ALL_WORKFLOWS);
+
+    if (claimAll) {
+      // Claim the oldest pending workflow globally (FIFO).
+      const pending = await ctx.db
+        .query("workflows")
+        .withIndex("status", (q) => q.eq("status", "pending"))
+        .order("asc")
+        .first();
+
+      if (pending) {
+        await ctx.db.patch(pending._id, {
+          status: "running",
+          claimedBy: args.workerId,
+          claimedAt: now,
+          leaseExpiresAt,
+        });
+        return {
+          workflowId: pending._id,
+          name: pending.name,
+          input: pending.input,
+        };
+      }
+
+      // Reclaim the most-expired lease globally.
+      const expired = await ctx.db
+        .query("workflows")
+        .withIndex("status_leaseExpiresAt", (q) =>
+          q.eq("status", "running").lt("leaseExpiresAt", now)
+        )
+        .order("asc")
+        .first();
+
+      if (expired) {
+        await ctx.db.patch(expired._id, {
+          claimedBy: args.workerId,
+          claimedAt: now,
+          leaseExpiresAt,
+        });
+        return {
+          workflowId: expired._id,
+          name: expired.name,
+          input: expired.input,
+        };
+      }
+
+      // Back-compat: reclaim older running workflows missing leaseExpiresAt.
+      const legacyRunning = await ctx.db
+        .query("workflows")
+        .withIndex("status", (q) => q.eq("status", "running"))
+        .order("asc")
+        .take(25);
+      for (const workflow of legacyRunning) {
+        if (
+          workflow.leaseExpiresAt == null &&
+          workflow.claimedAt != null &&
+          now - workflow.claimedAt > CLAIM_TIMEOUT_MS
+        ) {
+          await ctx.db.patch(workflow._id, {
+            claimedBy: args.workerId,
+            claimedAt: now,
+            leaseExpiresAt,
+          });
+          return {
+            workflowId: workflow._id,
+            name: workflow.name,
+            input: workflow.input,
+          };
+        }
+      }
+
+      return null;
+    }
+
+    // First, try to find a pending workflow (oldest first - global FIFO across requested names)
     // Query each name and find the globally oldest pending workflow
     let oldestPending: Awaited<ReturnType<typeof ctx.db.get>> | null = null;
 
@@ -482,6 +557,14 @@ export const subscribePendingWorkflows = query({
   },
   returns: v.number(), // just return count, triggers re-subscription
   handler: async (ctx, args) => {
+    if (args.workflowNames.includes(ALL_WORKFLOWS)) {
+      const pending = await ctx.db
+        .query("workflows")
+        .withIndex("status", (q) => q.eq("status", "pending"))
+        .first();
+      return pending ? 1 : 0;
+    }
+
     for (const name of args.workflowNames) {
       const pending = await ctx.db
         .query("workflows")

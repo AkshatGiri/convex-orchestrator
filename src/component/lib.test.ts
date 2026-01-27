@@ -347,4 +347,56 @@ describe("orchestrator component", () => {
     expect(claimed4?.workflowId).toEqual(order2);
     expect(claimed4?.name).toEqual("order");
   });
+
+  test('claimAll ("*") claims workflows globally in FIFO order', async () => {
+    const t = initConvexTest();
+
+    // Create workflows of different types, interleaved.
+    // Order: greet1, order1, greet2
+    const greet1 = await t.mutation(api.lib.startWorkflow, {
+      name: "greet",
+      input: { order: 1 },
+    });
+    const order1 = await t.mutation(api.lib.startWorkflow, {
+      name: "order",
+      input: { order: 2 },
+    });
+    const greet2 = await t.mutation(api.lib.startWorkflow, {
+      name: "greet",
+      input: { order: 3 },
+    });
+
+    const claimed1 = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["*"],
+      workerId: "worker-1",
+    });
+    expect(claimed1?.workflowId).toEqual(greet1);
+    expect(claimed1?.name).toEqual("greet");
+
+    await t.mutation(api.lib.completeWorkflow, {
+      workflowId: greet1,
+      workerId: "worker-1",
+      output: {},
+    });
+
+    const claimed2 = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["*"],
+      workerId: "worker-1",
+    });
+    expect(claimed2?.workflowId).toEqual(order1);
+    expect(claimed2?.name).toEqual("order");
+
+    await t.mutation(api.lib.completeWorkflow, {
+      workflowId: order1,
+      workerId: "worker-1",
+      output: {},
+    });
+
+    const claimed3 = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["*"],
+      workerId: "worker-1",
+    });
+    expect(claimed3?.workflowId).toEqual(greet2);
+    expect(claimed3?.name).toEqual("greet");
+  });
 });

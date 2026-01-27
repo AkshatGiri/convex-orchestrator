@@ -87,6 +87,59 @@ describe("worker unit tests", () => {
     vi.useRealTimers();
   });
 
+  test('claimAllWorkflows uses workflowNames ["*"]', async () => {
+    const claimWorkflowRef = Symbol("claimWorkflow") as any;
+    const subscribePendingRef = Symbol("subscribePendingWorkflows") as any;
+
+    const client = {
+      mutation: vi.fn(async (ref: any, _args: any) => {
+        if (ref === claimWorkflowRef) {
+          // Keep returning null to avoid executing anything.
+          return null;
+        }
+        throw new Error(`Unexpected mutation: ${String(ref)}`);
+      }),
+      query: vi.fn(async () => {
+        throw new Error("Unexpected query");
+      }),
+      onUpdate: vi.fn((_ref: any, args: any, _cb: any) => {
+        expect(args).toEqual({ workflowNames: ["*"] });
+        return () => {};
+      }),
+    };
+
+    const orchestratorApi: any = {
+      startWorkflow: Symbol("startWorkflow") as any,
+      claimWorkflow: claimWorkflowRef,
+      heartbeat: Symbol("heartbeat") as any,
+      completeWorkflow: Symbol("completeWorkflow") as any,
+      failWorkflow: Symbol("failWorkflow") as any,
+      getOrCreateStep: Symbol("getOrCreateStep") as any,
+      completeStep: Symbol("completeStep") as any,
+      failStep: Symbol("failStep") as any,
+      getWorkflow: Symbol("getWorkflow") as any,
+      subscribePendingWorkflows: subscribePendingRef,
+    };
+
+    const wf = workflow("test", async () => "ok");
+    const worker = createWorker(client as any, orchestratorApi, {
+      workflows: [wf],
+      claimAllWorkflows: true,
+      pollIntervalMs: 1000,
+    });
+
+    await worker.start();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(client.mutation).toHaveBeenCalledWith(claimWorkflowRef, {
+      workflowNames: ["*"],
+      workerId: worker.workerId,
+    });
+
+    worker.stop();
+  });
+
   test("worker stops writing results after claim is lost", async () => {
     const claimWorkflowRef = Symbol("claimWorkflow") as any;
     const heartbeatRef = Symbol("heartbeat") as any;

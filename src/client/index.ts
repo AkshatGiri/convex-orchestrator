@@ -108,6 +108,14 @@ export interface OrchestratorApi {
 export interface WorkerOptions {
   workflows: WorkflowDefinition<any, any>[];
   pollIntervalMs?: number;
+  /**
+   * If true, the worker will claim workflows globally (FIFO) by passing `["*"]`
+   * to the backend. This avoids per-name queries but may claim workflows you
+   * haven't registered.
+   *
+   * Reserve the workflow name "*" for this purpose.
+   */
+  claimAllWorkflows?: boolean;
 }
 
 // ============================================================================
@@ -165,6 +173,7 @@ export function createWorker(
   const workerId = generateWorkerId();
   const workflows = new Map<string, WorkflowDefinition>();
   const pollIntervalMs = options.pollIntervalMs ?? 1000;
+  const claimAllWorkflows = options.claimAllWorkflows ?? false;
 
   for (const wf of options.workflows) {
     workflows.set(wf.name, wf);
@@ -176,6 +185,7 @@ export function createWorker(
   let wakePoll: (() => void) | null = null;
 
   const workflowNames = Array.from(workflows.keys());
+  const workflowNamesForClaim = claimAllWorkflows ? ["*"] : workflowNames;
 
   async function executeWorkflow(
     workflowId: string,
@@ -329,7 +339,7 @@ export function createWorker(
       while (running) {
         try {
           const claimed = await client.mutation(orchestratorApi.claimWorkflow, {
-            workflowNames,
+            workflowNames: workflowNamesForClaim,
             workerId,
           });
 
@@ -381,7 +391,7 @@ export function createWorker(
       // Subscribe to pending workflow count for real-time updates
       unsubscribe = client.onUpdate(
         orchestratorApi.subscribePendingWorkflows,
-        { workflowNames },
+        { workflowNames: workflowNamesForClaim },
         (count) => {
           if (count > 0 && running) {
             // There are pending workflows, wake the poll loop.
