@@ -23,6 +23,7 @@ export default [
         project: [
           "./tsconfig.json",
           "./example/tsconfig.json",
+          "./example/tsconfig.scripts.json",
           "./example/convex/tsconfig.json",
         ],
         tsconfigRootDir: import.meta.dirname,

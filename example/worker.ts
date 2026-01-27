@@ -12,7 +12,7 @@ import { workflow, createWorker } from "../src/client/index.js";
 import { api } from "./convex/_generated/api.js";
 
 // Get CONVEX_URL from environment
-const CONVEX_URL = process.env.CONVEX_URL;
+const CONVEX_URL = process.env.CONVEX_URL as string;
 if (!CONVEX_URL) {
   console.error("CONVEX_URL environment variable is required");
   console.error("Run: export CONVEX_URL=<your-convex-url>");
@@ -60,7 +60,7 @@ const activities = {
     };
   },
 
-  async generateReport(data: any) {
+  async generateReport(data: unknown) {
     // Simulate report generation
     console.log(`📊 Generating report...`);
     await sleep(800);
@@ -159,7 +159,7 @@ async function main() {
   await sleep(1000);
 
   // Use the app's API (api.example) which wraps the component
-  const worker = createWorker(client, api.example as any, {
+  const worker = createWorker(client, api.example, {
     workflows: [orderWorkflow, greetWorkflow],
     pollIntervalMs: 2000,
   });

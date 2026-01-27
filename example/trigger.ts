@@ -27,7 +27,7 @@ async function main() {
 
   console.log(`\n🚀 Starting "${workflowName}" workflow...`);
 
-  let input: any;
+  let input: unknown;
   switch (workflowName) {
     case "greet":
       input = { name: "World" };
