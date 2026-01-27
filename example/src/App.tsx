@@ -1,200 +1,287 @@
 import "./App.css";
-import { useAction, useMutation, useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { useState } from "react";
 
-// Fake blog posts (not in database)
-const blogPosts = [
-  {
-    id: "blog-post-1",
-    title: "Getting Started with Convex Components",
-    content:
-      "Convex components are a powerful way to build reusable functionality that can be shared across different applications. In this post, we'll explore how to create and use components in your Convex applications.",
-    author: "Jane Doe",
-    date: "2024-01-15",
-  },
-  {
-    id: "blog-post-2",
-    title: "Building Scalable Comment Systems",
-    content:
-      "Comments are a fundamental feature of many web applications. Learn how to build a scalable comment system using Convex components that can handle thousands of comments efficiently.",
-    author: "John Smith",
-    date: "2024-01-20",
-  },
-];
+function WorkflowDashboard() {
+  const workflows = useQuery(api.example.listWorkflows, { limit: 20 });
+  const startWorkflow = useMutation(api.example.startWorkflow);
+  const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null);
 
-function BlogPostComments({ postId }: { postId: string }) {
-  const comments = useQuery(api.example.list, { targetId: postId });
-  const addComment = useMutation(api.example.add);
-  const translateComment = useAction(api.example.translateComment);
-  const [commentText, setCommentText] = useState("");
+  const steps = useQuery(
+    api.example.getWorkflowSteps,
+    selectedWorkflow ? { workflowId: selectedWorkflow } : "skip"
+  );
 
-  const handleAddComment = () => {
-    if (commentText.trim()) {
-      addComment({ text: commentText, targetId: postId });
-      setCommentText("");
+  const handleStartGreet = async () => {
+    await startWorkflow({
+      name: "greet",
+      input: { name: "World" },
+    });
+  };
+
+  const handleStartOrder = async () => {
+    await startWorkflow({
+      name: "order",
+      input: {
+        userId: "user_123",
+        email: "customer@example.com",
+        items: [
+          { name: "Widget", price: 29.99 },
+          { name: "Gadget", price: 49.99 },
+        ],
+      },
+    });
+  };
+
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case "pending":
+        return "#ffc107";
+      case "running":
+        return "#17a2b8";
+      case "completed":
+        return "#28a745";
+      case "failed":
+        return "#dc3545";
+      default:
+        return "#6c757d";
     }
   };
 
-  const handleTranslateComment = async (commentId: string) => {
-    await translateComment({ commentId });
-  };
-
   return (
-    <div
-      style={{
-        marginTop: "1.5rem",
-        padding: "1rem",
-        border: "1px solid rgba(128, 128, 128, 0.3)",
-        borderRadius: "8px",
-      }}
-    >
-      <h4 style={{ marginTop: 0, marginBottom: "1rem" }}>
-        Comments ({comments?.length ?? 0})
-      </h4>
-      <div style={{ marginBottom: "1rem" }}>
-        <input
-          type="text"
-          value={commentText}
-          onChange={(e) => setCommentText(e.target.value)}
-          placeholder="Enter a comment"
-          style={{ marginRight: "0.5rem", padding: "0.5rem", width: "70%" }}
-          onKeyPress={(e) => e.key === "Enter" && handleAddComment()}
-        />
-        <button onClick={handleAddComment}>Add Comment</button>
+    <div style={{ textAlign: "left" }}>
+      <div style={{ marginBottom: "1.5rem" }}>
+        <h3 style={{ marginBottom: "0.5rem" }}>Start New Workflow</h3>
+        <div style={{ display: "flex", gap: "0.5rem" }}>
+          <button onClick={handleStartGreet}>Start "greet" Workflow</button>
+          <button onClick={handleStartOrder}>Start "order" Workflow</button>
+        </div>
+        <p style={{ fontSize: "0.85rem", color: "#666", marginTop: "0.5rem" }}>
+          Make sure a worker is running: <code>bun example/worker.ts</code>
+        </p>
       </div>
-      <ul style={{ textAlign: "left", listStyle: "none", padding: 0 }}>
-        {comments?.map((comment) => (
-          <li
-            key={comment._id}
+
+      <div style={{ display: "flex", gap: "1rem" }}>
+        <div style={{ flex: 1 }}>
+          <h3>Workflows</h3>
+          <div
             style={{
-              marginBottom: "0.5rem",
-              display: "flex",
-              alignItems: "center",
-              gap: "0.5rem",
-              padding: "0.5rem",
-              backgroundColor: "rgba(128, 128, 128, 0.1)",
-              borderRadius: "4px",
+              border: "1px solid #ddd",
+              borderRadius: "8px",
+              overflow: "hidden",
             }}
           >
-            <span style={{ flex: 1 }}>{comment.text}</span>
-            <button
-              onClick={() => handleTranslateComment(comment._id)}
-              style={{
-                padding: "0.25rem 0.5rem",
-                fontSize: "0.75rem",
-                backgroundColor: "#ff9800",
-                color: "white",
-                border: "none",
-                borderRadius: "4px",
-                cursor: "pointer",
-              }}
-            >
-              🏴‍☠️ Translate to Pirate Talk
-            </button>
-          </li>
-        ))}
-        {comments?.length === 0 && (
-          <li
-            style={{ color: "rgba(128, 128, 128, 0.8)", fontStyle: "italic" }}
+            {workflows?.length === 0 && (
+              <div style={{ padding: "1rem", color: "#666" }}>
+                No workflows yet. Start one above!
+              </div>
+            )}
+            {workflows?.map((workflow) => (
+              <div
+                key={workflow._id}
+                onClick={() => setSelectedWorkflow(workflow._id)}
+                style={{
+                  padding: "0.75rem 1rem",
+                  borderBottom: "1px solid #eee",
+                  cursor: "pointer",
+                  backgroundColor:
+                    selectedWorkflow === workflow._id ? "#f0f7ff" : "white",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <div>
+                    <strong>{workflow.name}</strong>
+                    <span
+                      style={{
+                        marginLeft: "0.5rem",
+                        fontSize: "0.75rem",
+                        color: "#666",
+                      }}
+                    >
+                      {workflow._id.slice(0, 8)}...
+                    </span>
+                  </div>
+                  <span
+                    style={{
+                      padding: "0.25rem 0.5rem",
+                      borderRadius: "4px",
+                      fontSize: "0.75rem",
+                      backgroundColor: getStatusColor(workflow.status),
+                      color: "white",
+                    }}
+                  >
+                    {workflow.status}
+                  </span>
+                </div>
+                <div
+                  style={{ fontSize: "0.8rem", color: "#666", marginTop: "0.25rem" }}
+                >
+                  {new Date(workflow._creationTime).toLocaleString()}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ flex: 1 }}>
+          <h3>Steps</h3>
+          <div
+            style={{
+              border: "1px solid #ddd",
+              borderRadius: "8px",
+              overflow: "hidden",
+              minHeight: "200px",
+            }}
           >
-            No comments yet. Be the first to comment!
-          </li>
-        )}
-      </ul>
+            {!selectedWorkflow && (
+              <div style={{ padding: "1rem", color: "#666" }}>
+                Select a workflow to see its steps
+              </div>
+            )}
+            {selectedWorkflow && steps?.length === 0 && (
+              <div style={{ padding: "1rem", color: "#666" }}>
+                No steps executed yet
+              </div>
+            )}
+            {steps?.map((step) => (
+              <div
+                key={step._id}
+                style={{
+                  padding: "0.75rem 1rem",
+                  borderBottom: "1px solid #eee",
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <strong>{step.name}</strong>
+                  <span
+                    style={{
+                      padding: "0.25rem 0.5rem",
+                      borderRadius: "4px",
+                      fontSize: "0.75rem",
+                      backgroundColor: getStatusColor(step.status),
+                      color: "white",
+                    }}
+                  >
+                    {step.status}
+                  </span>
+                </div>
+                {step.output && (
+                  <pre
+                    style={{
+                      fontSize: "0.75rem",
+                      backgroundColor: "#f5f5f5",
+                      padding: "0.5rem",
+                      borderRadius: "4px",
+                      marginTop: "0.5rem",
+                      overflow: "auto",
+                    }}
+                  >
+                    {JSON.stringify(step.output, null, 2)}
+                  </pre>
+                )}
+                {step.error && (
+                  <div
+                    style={{
+                      fontSize: "0.75rem",
+                      color: "#dc3545",
+                      marginTop: "0.5rem",
+                    }}
+                  >
+                    Error: {step.error}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {selectedWorkflow && (
+        <div style={{ marginTop: "1rem" }}>
+          <h3>Workflow Details</h3>
+          {workflows
+            ?.filter((w) => w._id === selectedWorkflow)
+            .map((workflow) => (
+              <div
+                key={workflow._id}
+                style={{
+                  border: "1px solid #ddd",
+                  borderRadius: "8px",
+                  padding: "1rem",
+                }}
+              >
+                <div>
+                  <strong>Input:</strong>
+                </div>
+                <pre
+                  style={{
+                    fontSize: "0.75rem",
+                    backgroundColor: "#f5f5f5",
+                    padding: "0.5rem",
+                    borderRadius: "4px",
+                    overflow: "auto",
+                  }}
+                >
+                  {JSON.stringify(workflow.input, null, 2)}
+                </pre>
+                {workflow.output && (
+                  <>
+                    <div style={{ marginTop: "0.5rem" }}>
+                      <strong>Output:</strong>
+                    </div>
+                    <pre
+                      style={{
+                        fontSize: "0.75rem",
+                        backgroundColor: "#e8f5e9",
+                        padding: "0.5rem",
+                        borderRadius: "4px",
+                        overflow: "auto",
+                      }}
+                    >
+                      {JSON.stringify(workflow.output, null, 2)}
+                    </pre>
+                  </>
+                )}
+                {workflow.error && (
+                  <div
+                    style={{
+                      marginTop: "0.5rem",
+                      padding: "0.5rem",
+                      backgroundColor: "#ffebee",
+                      borderRadius: "4px",
+                      color: "#dc3545",
+                    }}
+                  >
+                    <strong>Error:</strong> {workflow.error}
+                  </div>
+                )}
+              </div>
+            ))}
+        </div>
+      )}
     </div>
   );
 }
 
 function App() {
-  // Construct the HTTP endpoint URL
-  // Replace .convex.cloud with .convex.site for HTTP endpoints
-  const convexUrl = import.meta.env.VITE_CONVEX_URL.replace(".cloud", ".site");
-
   return (
     <>
-      <h1>Example App</h1>
+      <h1>Convex Orchestrator Demo</h1>
       <div className="card">
-        {blogPosts.map((post) => (
-          <div
-            key={post.id}
-            style={{
-              marginBottom: "2rem",
-              padding: "1.5rem",
-              border: "1px solid rgba(128, 128, 128, 0.3)",
-              borderRadius: "8px",
-            }}
-          >
-            <h2 style={{ marginTop: 0 }}>{post.title}</h2>
-            <div
-              style={{
-                marginBottom: "0.5rem",
-                color: "rgba(128, 128, 128, 0.8)",
-                fontSize: "0.9rem",
-              }}
-            >
-              By {post.author} • {post.date}
-            </div>
-            <p style={{ lineHeight: "1.6", marginBottom: "1rem" }}>
-              {post.content}
-            </p>
-            <BlogPostComments postId={post.id} />
-          </div>
-        ))}
-        <div
-          style={{
-            marginTop: "1.5rem",
-            padding: "1rem",
-            backgroundColor: "rgba(128, 128, 128, 0.1)",
-            borderRadius: "8px",
-          }}
-        >
-          <h3>HTTP Endpoint Demo</h3>
-          <p style={{ fontSize: "0.9rem", marginBottom: "0.5rem" }}>
-            The component exposes an HTTP endpoint to get the latest comment:
-          </p>
-          <div
-            style={{
-              display: "flex",
-              gap: "0.5rem",
-              flexDirection: "column",
-              justifyContent: "center",
-            }}
-          >
-            {blogPosts.map((post) => {
-              const httpUrl =
-                convexUrl +
-                `/comments/last?targetId=${encodeURIComponent(post.id)}`;
-              return (
-                <a
-                  key={post.id}
-                  href={httpUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={{
-                    display: "inline-block",
-                    padding: "0.5rem 1rem",
-                    backgroundColor: "#007bff",
-                    color: "white",
-                    textDecoration: "none",
-                    borderRadius: "4px",
-                    fontSize: "0.9rem",
-                  }}
-                >
-                  {post.title} - HTTP Endpoint
-                </a>
-              );
-            })}
-          </div>
-          <p style={{ fontSize: "0.8rem", color: "#666", marginTop: "0.5rem" }}>
-            See <code>example/convex/http.ts</code> for the HTTP route
-            configuration
-          </p>
-        </div>
-        <p>
-          See <code>example/convex/example.ts</code> for all the ways to use
-          this component
-        </p>
+        <WorkflowDashboard />
       </div>
     </>
   );

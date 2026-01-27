@@ -24,31 +24,123 @@ import type { FunctionReference } from "convex/server";
 export type ComponentApi<Name extends string | undefined = string | undefined> =
   {
     lib: {
-      add: FunctionReference<
+      claimWorkflow: FunctionReference<
         "mutation",
         "internal",
-        { targetId: string; text: string; userId: string },
-        string,
+        { workerId: string; workflowNames: Array<string> },
+        null | { input: any; name: string; workflowId: string },
         Name
       >;
-      list: FunctionReference<
+      completeStep: FunctionReference<
+        "mutation",
+        "internal",
+        { output: any; stepId: string },
+        boolean,
+        Name
+      >;
+      completeWorkflow: FunctionReference<
+        "mutation",
+        "internal",
+        { output: any; workerId: string; workflowId: string },
+        boolean,
+        Name
+      >;
+      failStep: FunctionReference<
+        "mutation",
+        "internal",
+        { error: string; stepId: string },
+        boolean,
+        Name
+      >;
+      failWorkflow: FunctionReference<
+        "mutation",
+        "internal",
+        { error: string; workerId: string; workflowId: string },
+        boolean,
+        Name
+      >;
+      getOrCreateStep: FunctionReference<
+        "mutation",
+        "internal",
+        { stepName: string; workflowId: string },
+        {
+          error?: string;
+          isNew: boolean;
+          output?: any;
+          status: "pending" | "running" | "completed" | "failed";
+          stepId: string;
+        },
+        Name
+      >;
+      getWorkflow: FunctionReference<
         "query",
         "internal",
-        { limit?: number; targetId: string },
+        { workflowId: string },
+        null | {
+          _creationTime: number;
+          _id: string;
+          error?: string;
+          input: any;
+          name: string;
+          output?: any;
+          status: "pending" | "running" | "completed" | "failed";
+        },
+        Name
+      >;
+      getWorkflowSteps: FunctionReference<
+        "query",
+        "internal",
+        { workflowId: string },
         Array<{
           _creationTime: number;
           _id: string;
-          targetId: string;
-          text: string;
-          userId: string;
+          attempts: number;
+          completedAt?: number;
+          error?: string;
+          name: string;
+          output?: any;
+          startedAt?: number;
+          status: "pending" | "running" | "completed" | "failed";
         }>,
         Name
       >;
-      translate: FunctionReference<
-        "action",
+      heartbeat: FunctionReference<
+        "mutation",
         "internal",
-        { baseUrl: string; commentId: string },
+        { workerId: string; workflowId: string },
+        boolean,
+        Name
+      >;
+      listWorkflows: FunctionReference<
+        "query",
+        "internal",
+        {
+          limit?: number;
+          status?: "pending" | "running" | "completed" | "failed";
+        },
+        Array<{
+          _creationTime: number;
+          _id: string;
+          error?: string;
+          input: any;
+          name: string;
+          output?: any;
+          status: "pending" | "running" | "completed" | "failed";
+        }>,
+        Name
+      >;
+      startWorkflow: FunctionReference<
+        "mutation",
+        "internal",
+        { input: any; name: string },
         string,
+        Name
+      >;
+      subscribePendingWorkflows: FunctionReference<
+        "query",
+        "internal",
+        { workflowNames: Array<string> },
+        number,
         Name
       >;
     };

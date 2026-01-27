@@ -1,91 +1,413 @@
 import { v } from "convex/values";
-import { httpActionGeneric } from "convex/server";
-import {
-  action,
-  internalMutation,
-  internalQuery,
-  mutation,
-  query,
-} from "./_generated/server.js";
-import { api, internal } from "./_generated/api.js";
-import schema from "./schema.js";
+import { mutation, query } from "./_generated/server.js";
+import { workflowStatus, stepStatus } from "./schema.js";
 
-const commentValidator = schema.tables.comments.validator.extend({
-  _id: v.id("comments"),
-  _creationTime: v.number(),
+// How long before a claimed workflow is considered abandoned (30 seconds)
+const CLAIM_TIMEOUT_MS = 30_000;
+
+// ============================================================================
+// Workflow Management
+// ============================================================================
+
+/**
+ * Start a new workflow instance
+ */
+export const startWorkflow = mutation({
+  args: {
+    name: v.string(),
+    input: v.any(),
+  },
+  returns: v.id("workflows"),
+  handler: async (ctx, args) => {
+    const workflowId = await ctx.db.insert("workflows", {
+      name: args.name,
+      status: "pending",
+      input: args.input,
+    });
+    return workflowId;
+  },
 });
 
-export const list = query({
+/**
+ * Claim a pending workflow for execution
+ * Returns null if no workflow available or claim failed
+ */
+export const claimWorkflow = mutation({
   args: {
-    targetId: v.string(),
+    workflowNames: v.array(v.string()), // which workflow types this worker handles
+    workerId: v.string(),
+  },
+  returns: v.union(
+    v.null(),
+    v.object({
+      workflowId: v.id("workflows"),
+      name: v.string(),
+      input: v.any(),
+    })
+  ),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+
+    // First, try to find a pending workflow
+    for (const name of args.workflowNames) {
+      const pending = await ctx.db
+        .query("workflows")
+        .withIndex("name_status", (q) => q.eq("name", name).eq("status", "pending"))
+        .first();
+
+      if (pending) {
+        await ctx.db.patch(pending._id, {
+          status: "running",
+          claimedBy: args.workerId,
+          claimedAt: now,
+        });
+        return {
+          workflowId: pending._id,
+          name: pending.name,
+          input: pending.input,
+        };
+      }
+    }
+
+    // Check for abandoned workflows (claimed but timed out)
+    for (const name of args.workflowNames) {
+      const running = await ctx.db
+        .query("workflows")
+        .withIndex("name_status", (q) => q.eq("name", name).eq("status", "running"))
+        .collect();
+
+      for (const workflow of running) {
+        if (workflow.claimedAt && now - workflow.claimedAt > CLAIM_TIMEOUT_MS) {
+          // Workflow was abandoned, reclaim it
+          await ctx.db.patch(workflow._id, {
+            claimedBy: args.workerId,
+            claimedAt: now,
+          });
+          return {
+            workflowId: workflow._id,
+            name: workflow.name,
+            input: workflow.input,
+          };
+        }
+      }
+    }
+
+    return null;
+  },
+});
+
+/**
+ * Heartbeat to keep a workflow claim alive
+ */
+export const heartbeat = mutation({
+  args: {
+    workflowId: v.id("workflows"),
+    workerId: v.string(),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const workflow = await ctx.db.get(args.workflowId);
+    if (!workflow || workflow.claimedBy !== args.workerId) {
+      return false;
+    }
+    await ctx.db.patch(args.workflowId, {
+      claimedAt: Date.now(),
+    });
+    return true;
+  },
+});
+
+/**
+ * Complete a workflow successfully
+ */
+export const completeWorkflow = mutation({
+  args: {
+    workflowId: v.id("workflows"),
+    workerId: v.string(),
+    output: v.any(),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const workflow = await ctx.db.get(args.workflowId);
+    if (!workflow || workflow.claimedBy !== args.workerId) {
+      return false;
+    }
+    await ctx.db.patch(args.workflowId, {
+      status: "completed",
+      output: args.output,
+      claimedBy: undefined,
+      claimedAt: undefined,
+    });
+    return true;
+  },
+});
+
+/**
+ * Fail a workflow
+ */
+export const failWorkflow = mutation({
+  args: {
+    workflowId: v.id("workflows"),
+    workerId: v.string(),
+    error: v.string(),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const workflow = await ctx.db.get(args.workflowId);
+    if (!workflow || workflow.claimedBy !== args.workerId) {
+      return false;
+    }
+    await ctx.db.patch(args.workflowId, {
+      status: "failed",
+      error: args.error,
+      claimedBy: undefined,
+      claimedAt: undefined,
+    });
+    return true;
+  },
+});
+
+/**
+ * Get workflow status
+ */
+export const getWorkflow = query({
+  args: {
+    workflowId: v.id("workflows"),
+  },
+  returns: v.union(
+    v.null(),
+    v.object({
+      _id: v.id("workflows"),
+      _creationTime: v.number(),
+      name: v.string(),
+      status: workflowStatus,
+      input: v.any(),
+      output: v.optional(v.any()),
+      error: v.optional(v.string()),
+    })
+  ),
+  handler: async (ctx, args) => {
+    const workflow = await ctx.db.get(args.workflowId);
+    if (!workflow) return null;
+    return {
+      _id: workflow._id,
+      _creationTime: workflow._creationTime,
+      name: workflow.name,
+      status: workflow.status,
+      input: workflow.input,
+      output: workflow.output,
+      error: workflow.error,
+    };
+  },
+});
+
+/**
+ * List workflows (for dashboard)
+ */
+export const listWorkflows = query({
+  args: {
+    status: v.optional(workflowStatus),
     limit: v.optional(v.number()),
   },
-  returns: v.array(commentValidator),
+  returns: v.array(
+    v.object({
+      _id: v.id("workflows"),
+      _creationTime: v.number(),
+      name: v.string(),
+      status: workflowStatus,
+      input: v.any(),
+      output: v.optional(v.any()),
+      error: v.optional(v.string()),
+    })
+  ),
   handler: async (ctx, args) => {
-    return await ctx.db
-      .query("comments")
-      .withIndex("targetId", (q) => q.eq("targetId", args.targetId))
-      .order("desc")
-      .take(args.limit ?? 100);
+    const limit = args.limit ?? 100;
+
+    const workflows = args.status
+      ? await ctx.db
+          .query("workflows")
+          .withIndex("status", (q) => q.eq("status", args.status!))
+          .order("desc")
+          .take(limit)
+      : await ctx.db.query("workflows").order("desc").take(limit);
+
+    return workflows.map((w) => ({
+      _id: w._id,
+      _creationTime: w._creationTime,
+      name: w.name,
+      status: w.status,
+      input: w.input,
+      output: w.output,
+      error: w.error,
+    }));
   },
 });
 
-export const getComment = internalQuery({
-  args: {
-    commentId: v.id("comments"),
-  },
-  returns: v.union(v.null(), commentValidator),
-  handler: async (ctx, args) => {
-    return await ctx.db.get("comments", args.commentId);
-  },
-});
-export const add = mutation({
-  args: {
-    text: v.string(),
-    userId: v.string(),
-    targetId: v.string(),
-  },
-  returns: v.id("comments"),
-  handler: async (ctx, args) => {
-    const commentId = await ctx.db.insert("comments", {
-      text: args.text,
-      userId: args.userId,
-      targetId: args.targetId,
-    });
-    return commentId;
-  },
-});
-export const updateComment = internalMutation({
-  args: {
-    commentId: v.id("comments"),
-    text: v.string(),
-  },
-  handler: async (ctx, args) => {
-    await ctx.db.patch("comments", args.commentId, { text: args.text });
-  },
-});
+// ============================================================================
+// Step Management
+// ============================================================================
 
-export const translate = action({
+/**
+ * Get or create a step for a workflow
+ * Returns the step status and result if already completed
+ */
+export const getOrCreateStep = mutation({
   args: {
-    commentId: v.id("comments"),
-    baseUrl: v.string(),
+    workflowId: v.id("workflows"),
+    stepName: v.string(),
   },
-  returns: v.string(),
+  returns: v.object({
+    stepId: v.id("steps"),
+    status: stepStatus,
+    output: v.optional(v.any()),
+    error: v.optional(v.string()),
+    isNew: v.boolean(),
+  }),
   handler: async (ctx, args) => {
-    const comment = (await ctx.runQuery(internal.lib.getComment, {
-      commentId: args.commentId,
-    })) as { text: string; userId: string } | null;
-    if (!comment) {
-      throw new Error("Comment not found");
+    // Check if step already exists
+    const existing = await ctx.db
+      .query("steps")
+      .withIndex("workflowId_name", (q) =>
+        q.eq("workflowId", args.workflowId).eq("name", args.stepName)
+      )
+      .first();
+
+    if (existing) {
+      return {
+        stepId: existing._id,
+        status: existing.status,
+        output: existing.output,
+        error: existing.error,
+        isNew: false,
+      };
     }
-    const response = await fetch(
-      `${args.baseUrl}/api/translate?english=${encodeURIComponent(comment.text)}`,
-    );
-    const data = await response.text();
-    await ctx.runMutation(internal.lib.updateComment, {
-      commentId: args.commentId,
-      text: data,
+
+    // Create new step
+    const stepId = await ctx.db.insert("steps", {
+      workflowId: args.workflowId,
+      name: args.stepName,
+      status: "running",
+      attempts: 1,
+      startedAt: Date.now(),
     });
-    return data;
+
+    return {
+      stepId,
+      status: "running" as const,
+      output: undefined,
+      error: undefined,
+      isNew: true,
+    };
+  },
+});
+
+/**
+ * Complete a step successfully
+ */
+export const completeStep = mutation({
+  args: {
+    stepId: v.id("steps"),
+    output: v.any(),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const step = await ctx.db.get(args.stepId);
+    if (!step || step.status === "completed") {
+      return false;
+    }
+    await ctx.db.patch(args.stepId, {
+      status: "completed",
+      output: args.output,
+      completedAt: Date.now(),
+    });
+    return true;
+  },
+});
+
+/**
+ * Fail a step
+ */
+export const failStep = mutation({
+  args: {
+    stepId: v.id("steps"),
+    error: v.string(),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const step = await ctx.db.get(args.stepId);
+    if (!step) {
+      return false;
+    }
+    await ctx.db.patch(args.stepId, {
+      status: "failed",
+      error: args.error,
+      completedAt: Date.now(),
+    });
+    return true;
+  },
+});
+
+/**
+ * Get all steps for a workflow
+ */
+export const getWorkflowSteps = query({
+  args: {
+    workflowId: v.id("workflows"),
+  },
+  returns: v.array(
+    v.object({
+      _id: v.id("steps"),
+      _creationTime: v.number(),
+      name: v.string(),
+      status: stepStatus,
+      output: v.optional(v.any()),
+      error: v.optional(v.string()),
+      attempts: v.number(),
+      startedAt: v.optional(v.number()),
+      completedAt: v.optional(v.number()),
+    })
+  ),
+  handler: async (ctx, args) => {
+    const steps = await ctx.db
+      .query("steps")
+      .withIndex("workflowId", (q) => q.eq("workflowId", args.workflowId))
+      .collect();
+
+    return steps.map((s) => ({
+      _id: s._id,
+      _creationTime: s._creationTime,
+      name: s.name,
+      status: s.status,
+      output: s.output,
+      error: s.error,
+      attempts: s.attempts,
+      startedAt: s.startedAt,
+      completedAt: s.completedAt,
+    }));
+  },
+});
+
+// ============================================================================
+// Subscriptions for real-time updates
+// ============================================================================
+
+/**
+ * Subscribe to pending workflows (for workers)
+ */
+export const subscribePendingWorkflows = query({
+  args: {
+    workflowNames: v.array(v.string()),
+  },
+  returns: v.number(), // just return count, triggers re-subscription
+  handler: async (ctx, args) => {
+    let count = 0;
+    for (const name of args.workflowNames) {
+      const pending = await ctx.db
+        .query("workflows")
+        .withIndex("name_status", (q) => q.eq("name", name).eq("status", "pending"))
+        .collect();
+      count += pending.length;
+    }
+    return count;
   },
 });

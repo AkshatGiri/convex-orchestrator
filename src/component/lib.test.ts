@@ -4,24 +4,164 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { api } from "./_generated/api.js";
 import { initConvexTest } from "./setup.test.js";
 
-describe("component lib", () => {
+describe("orchestrator component", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
   });
   afterEach(() => {
     vi.useRealTimers();
   });
-  test("example lib test", async () => {
+
+  test("can start a workflow", async () => {
     const t = initConvexTest();
-    const targetId = "test-subject-1";
-    const commentId = await t.mutation(api.lib.add, {
-      text: "Hello, world!",
-      userId: "user1",
-      targetId,
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: { foo: "bar" },
     });
-    expect(commentId).toBeDefined();
-    const comments = await t.query(api.lib.list, { targetId });
-    expect(comments).toHaveLength(1);
-    expect(comments[0].text).toEqual("Hello, world!");
+    expect(workflowId).toBeDefined();
+
+    const workflow = await t.query(api.lib.getWorkflow, { workflowId });
+    expect(workflow).toBeDefined();
+    expect(workflow?.name).toEqual("test-workflow");
+    expect(workflow?.status).toEqual("pending");
+    expect(workflow?.input).toEqual({ foo: "bar" });
+  });
+
+  test("can claim a workflow", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: { foo: "bar" },
+    });
+
+    const claimed = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+
+    expect(claimed).toBeDefined();
+    expect(claimed?.workflowId).toEqual(workflowId);
+    expect(claimed?.name).toEqual("test-workflow");
+
+    const workflow = await t.query(api.lib.getWorkflow, { workflowId });
+    expect(workflow?.status).toEqual("running");
+  });
+
+  test("can create and complete steps", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: {},
+    });
+
+    // Create a step
+    const step1 = await t.mutation(api.lib.getOrCreateStep, {
+      workflowId,
+      stepName: "step-1",
+    });
+    expect(step1.isNew).toBe(true);
+    expect(step1.status).toEqual("running");
+
+    // Complete the step
+    await t.mutation(api.lib.completeStep, {
+      stepId: step1.stepId,
+      output: { result: "success" },
+    });
+
+    // Getting the same step should return cached result
+    const step1Again = await t.mutation(api.lib.getOrCreateStep, {
+      workflowId,
+      stepName: "step-1",
+    });
+    expect(step1Again.isNew).toBe(false);
+    expect(step1Again.status).toEqual("completed");
+    expect(step1Again.output).toEqual({ result: "success" });
+  });
+
+  test("can complete a workflow", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: {},
+    });
+
+    // Claim the workflow
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+
+    // Complete the workflow
+    await t.mutation(api.lib.completeWorkflow, {
+      workflowId,
+      workerId: "worker-1",
+      output: { final: "result" },
+    });
+
+    const workflow = await t.query(api.lib.getWorkflow, { workflowId });
+    expect(workflow?.status).toEqual("completed");
+    expect(workflow?.output).toEqual({ final: "result" });
+  });
+
+  test("can fail a workflow", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: {},
+    });
+
+    // Claim the workflow
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+
+    // Fail the workflow
+    await t.mutation(api.lib.failWorkflow, {
+      workflowId,
+      workerId: "worker-1",
+      error: "Something went wrong",
+    });
+
+    const workflow = await t.query(api.lib.getWorkflow, { workflowId });
+    expect(workflow?.status).toEqual("failed");
+    expect(workflow?.error).toEqual("Something went wrong");
+  });
+
+  test("can list workflows", async () => {
+    const t = initConvexTest();
+
+    await t.mutation(api.lib.startWorkflow, {
+      name: "workflow-1",
+      input: {},
+    });
+    await t.mutation(api.lib.startWorkflow, {
+      name: "workflow-2",
+      input: {},
+    });
+
+    const workflows = await t.query(api.lib.listWorkflows, {});
+    expect(workflows).toHaveLength(2);
+  });
+
+  test("only claims workflows for registered names", async () => {
+    const t = initConvexTest();
+
+    await t.mutation(api.lib.startWorkflow, {
+      name: "workflow-a",
+      input: {},
+    });
+    await t.mutation(api.lib.startWorkflow, {
+      name: "workflow-b",
+      input: {},
+    });
+
+    // Only looking for workflow-a
+    const claimed = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["workflow-a"],
+      workerId: "worker-1",
+    });
+
+    expect(claimed?.name).toEqual("workflow-a");
   });
 });

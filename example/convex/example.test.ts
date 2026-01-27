@@ -11,16 +11,35 @@ describe("example", () => {
     vi.useRealTimers();
   });
 
-  test("addComment and listComments", async () => {
+  test("startWorkflow and getWorkflow", async () => {
     const t = initConvexTest();
-    const targetId = "test-subject-1";
-    const commentId = await t.mutation(api.example.addComment, {
-      text: "My comment",
-      targetId,
+    const workflowId = await t.mutation(api.example.startWorkflow, {
+      name: "test-workflow",
+      input: { foo: "bar" },
     });
-    expect(commentId).toBeDefined();
-    const comments = await t.query(api.example.listComments, { targetId });
-    expect(comments).toHaveLength(1);
-    expect(comments[0].text).toBe("My comment");
+    expect(workflowId).toBeDefined();
+
+    const workflow = await t.query(api.example.getWorkflow, {
+      workflowId: workflowId as string,
+    });
+    expect(workflow).toBeDefined();
+    expect(workflow?.name).toBe("test-workflow");
+    expect(workflow?.status).toBe("pending");
+  });
+
+  test("listWorkflows", async () => {
+    const t = initConvexTest();
+
+    await t.mutation(api.example.startWorkflow, {
+      name: "workflow-1",
+      input: {},
+    });
+    await t.mutation(api.example.startWorkflow, {
+      name: "workflow-2",
+      input: {},
+    });
+
+    const workflows = await t.query(api.example.listWorkflows, {});
+    expect(workflows).toHaveLength(2);
   });
 });

@@ -3,34 +3,50 @@ import { exposeApi } from "./index.js";
 import { anyApi, type ApiFromModules } from "convex/server";
 import { components, initConvexTest } from "./setup.test.js";
 
-export const { add, list } = exposeApi(components.convexOrchestrator, {
-  auth: async (ctx, _operation) => {
-    return (await ctx.auth.getUserIdentity())?.subject ?? "anonymous";
-  },
-  baseUrl: "https://pirate.monkeyness.com",
-});
+export const { startWorkflow, getWorkflow, listWorkflows, getWorkflowSteps } =
+  exposeApi(components.convexOrchestrator);
 
 const testApi = (
   anyApi as unknown as ApiFromModules<{
     "index.test": {
-      add: typeof add;
-      list: typeof list;
+      startWorkflow: typeof startWorkflow;
+      getWorkflow: typeof getWorkflow;
+      listWorkflows: typeof listWorkflows;
+      getWorkflowSteps: typeof getWorkflowSteps;
     };
   }>
 )["index.test"];
 
 describe("client tests", () => {
-  test("should be able to use client", async () => {
-    const t = initConvexTest().withIdentity({
-      subject: "user1",
+  test("should be able to start a workflow via exposed API", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(testApi.startWorkflow, {
+      name: "test-workflow",
+      input: { foo: "bar" },
     });
-    const targetId = "test-subject-1";
-    await t.mutation(testApi.add, {
-      text: "My first comment",
-      targetId: targetId,
+    expect(workflowId).toBeDefined();
+
+    const workflow = await t.query(testApi.getWorkflow, {
+      workflowId: workflowId as string,
     });
-    const comments = await t.query(testApi.list, { targetId });
-    expect(comments).toHaveLength(1);
-    expect(comments[0].text).toBe("My first comment");
+    expect(workflow).toBeDefined();
+    expect(workflow?.name).toBe("test-workflow");
+    expect(workflow?.status).toBe("pending");
+  });
+
+  test("should be able to list workflows via exposed API", async () => {
+    const t = initConvexTest();
+
+    await t.mutation(testApi.startWorkflow, {
+      name: "workflow-1",
+      input: {},
+    });
+    await t.mutation(testApi.startWorkflow, {
+      name: "workflow-2",
+      input: {},
+    });
+
+    const workflows = await t.query(testApi.listWorkflows, {});
+    expect(workflows).toHaveLength(2);
   });
 });
