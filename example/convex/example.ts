@@ -1,5 +1,5 @@
 import { components } from "./_generated/api.js";
-import { exposeApi } from "@akshatgiri/convex-orchestrator";
+import { exposeApi, exposeApiWithWorker } from "@akshatgiri/convex-orchestrator";
 
 // Expose the full orchestrator API for use from the frontend and worker
 export const {
@@ -8,7 +8,10 @@ export const {
   getWorkflow,
   listWorkflows,
   getWorkflowSteps,
-  // For worker operations
+} = exposeApi(components.convexOrchestrator);
+
+export const {
+  // For worker operations (intentionally opt-in; protect in production)
   claimWorkflow,
   heartbeat,
   completeWorkflow,
@@ -17,4 +20,6 @@ export const {
   completeStep,
   failStep,
   subscribePendingWorkflows,
-} = exposeApi(components.convexOrchestrator);
+} = exposeApiWithWorker(components.convexOrchestrator, {
+  authorize: () => true,
+});

@@ -1,4 +1,4 @@
-import { ConvexClient } from "convex/browser";
+import type { ConvexClient } from "convex/browser";
 import type { FunctionReference } from "convex/server";
 import { mutationGeneric, queryGeneric } from "convex/server";
 import { v } from "convex/values";
@@ -40,6 +40,12 @@ export interface WorkflowHandle {
   result: () => Promise<unknown>;
 }
 
+export interface ConvexWorkerClient {
+  mutation: ConvexClient["mutation"];
+  query: ConvexClient["query"];
+  onUpdate: ConvexClient["onUpdate"];
+}
+
 // API type that workers need to operate
 export interface OrchestratorApi {
   startWorkflow: FunctionReference<"mutation", "public", { name: string; input: any }, string>;
@@ -70,19 +76,19 @@ export interface OrchestratorApi {
   getOrCreateStep: FunctionReference<
     "mutation",
     "public",
-    { workflowId: string; stepName: string },
+    { workflowId: string; stepName: string; workerId: string },
     { stepId: string; status: StepStatus; output?: any; error?: string; isNew: boolean }
   >;
   completeStep: FunctionReference<
     "mutation",
     "public",
-    { stepId: string; output: any },
+    { stepId: string; workerId: string; output: any },
     boolean
   >;
   failStep: FunctionReference<
     "mutation",
     "public",
-    { stepId: string; error: string },
+    { stepId: string; workerId: string; error: string },
     boolean
   >;
   getWorkflow: FunctionReference<
@@ -152,7 +158,7 @@ export function workflow<TInput, TOutput>(
  * ```
  */
 export function createWorker(
-  client: ConvexClient,
+  client: ConvexWorkerClient,
   orchestratorApi: OrchestratorApi,
   options: WorkerOptions
 ) {
@@ -165,8 +171,9 @@ export function createWorker(
   }
 
   let running = false;
-  let pollTimeout: ReturnType<typeof setTimeout> | null = null;
   let unsubscribe: (() => void) | null = null;
+  let pollLoopRunning = false;
+  let wakePoll: (() => void) | null = null;
 
   const workflowNames = Array.from(workflows.keys());
 
@@ -181,16 +188,26 @@ export function createWorker(
       return;
     }
 
+    const claimState = { lost: false };
+
     // Create the context with step function
     const ctx: WorkflowContext<unknown> = {
       input,
       workflowId,
       step: async <T>(name: string, fn: () => T | Promise<T>): Promise<T> => {
+        if (claimState.lost) {
+          throw new Error("Workflow claim lost");
+        }
         // Check if step already completed
         const stepInfo = await client.mutation(orchestratorApi.getOrCreateStep, {
           workflowId,
           stepName: name,
+          workerId,
         });
+
+        if (claimState.lost) {
+          throw new Error("Workflow claim lost");
+        }
 
         if (!stepInfo.isNew && stepInfo.status === "completed") {
           // Step already completed, return cached result
@@ -206,19 +223,32 @@ export function createWorker(
         try {
           const result = await fn();
 
+          if (claimState.lost) {
+            throw new Error("Workflow claim lost");
+          }
+
           // Store the result
-          await client.mutation(orchestratorApi.completeStep, {
+          const ok = await client.mutation(orchestratorApi.completeStep, {
             stepId: stepInfo.stepId,
+            workerId,
             output: result,
           });
+          if (!ok) {
+            throw new Error("Failed to record step result (claim lost?)");
+          }
 
           return result;
         } catch (error) {
-          // Store the error
-          await client.mutation(orchestratorApi.failStep, {
-            stepId: stepInfo.stepId,
-            error: error instanceof Error ? error.message : String(error),
-          });
+          // Best-effort store the error (may fail if claim was lost)
+          try {
+            await client.mutation(orchestratorApi.failStep, {
+              stepId: stepInfo.stepId,
+              workerId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          } catch {
+            // ignore
+          }
           throw error;
         }
       },
@@ -226,11 +256,16 @@ export function createWorker(
 
     // Start heartbeat
     const heartbeatInterval = setInterval(async () => {
+      if (claimState.lost) return;
       try {
-        await client.mutation(orchestratorApi.heartbeat, {
+        const ok = await client.mutation(orchestratorApi.heartbeat, {
           workflowId,
           workerId,
         });
+        if (!ok) {
+          claimState.lost = true;
+          console.warn(`Lost claim for workflow ${workflowId}`);
+        }
       } catch (e) {
         // Heartbeat failed, workflow may have been reassigned
         console.warn("Heartbeat failed:", e);
@@ -241,21 +276,36 @@ export function createWorker(
       // Execute the workflow
       const result = await workflowDef.fn(ctx, input);
 
+      if (claimState.lost) {
+        return;
+      }
+
       // Mark workflow as completed
-      await client.mutation(orchestratorApi.completeWorkflow, {
+      const ok = await client.mutation(orchestratorApi.completeWorkflow, {
         workflowId,
         workerId,
         output: result,
       });
+      if (!ok) {
+        console.warn(`Failed to complete workflow ${workflowId} (claim lost?)`);
+        return;
+      }
 
       console.log(`Workflow ${workflowId} completed successfully`);
     } catch (error) {
+      if (claimState.lost) {
+        return;
+      }
       // Mark workflow as failed
-      await client.mutation(orchestratorApi.failWorkflow, {
+      const ok = await client.mutation(orchestratorApi.failWorkflow, {
         workflowId,
         workerId,
         error: error instanceof Error ? error.message : String(error),
       });
+      if (!ok) {
+        console.warn(`Failed to fail workflow ${workflowId} (claim lost?)`);
+        return;
+      }
 
       console.error(`Workflow ${workflowId} failed:`, error);
     } finally {
@@ -263,32 +313,57 @@ export function createWorker(
     }
   }
 
-  async function poll() {
+  function triggerPoll() {
     if (!running) return;
-
-    try {
-      // Try to claim a workflow
-      const claimed = await client.mutation(orchestratorApi.claimWorkflow, {
-        workflowNames,
-        workerId,
-      });
-
-      if (claimed) {
-        console.log(`Claimed workflow: ${claimed.workflowId} (${claimed.name})`);
-        await executeWorkflow(claimed.workflowId, claimed.name, claimed.input);
-        // Immediately poll again after completing a workflow
-        if (running) {
-          poll();
-          return;
-        }
-      }
-    } catch (error) {
-      console.error("Error polling for workflows:", error);
+    if (wakePoll) {
+      wakePoll();
+      return;
     }
+    void pollLoop();
+  }
 
-    // Schedule next poll
-    if (running) {
-      pollTimeout = setTimeout(poll, pollIntervalMs);
+  async function pollLoop() {
+    if (pollLoopRunning) return;
+    pollLoopRunning = true;
+    try {
+      while (running) {
+        try {
+          const claimed = await client.mutation(orchestratorApi.claimWorkflow, {
+            workflowNames,
+            workerId,
+          });
+
+          if (claimed) {
+            console.log(
+              `Claimed workflow: ${claimed.workflowId} (${claimed.name})`
+            );
+            await executeWorkflow(
+              claimed.workflowId,
+              claimed.name,
+              claimed.input
+            );
+            continue;
+          }
+        } catch (error) {
+          console.error("Error polling for workflows:", error);
+        }
+
+        await new Promise<void>((resolve) => {
+          const timeout = setTimeout(() => {
+            wakePoll = null;
+            resolve();
+          }, pollIntervalMs);
+
+          wakePoll = () => {
+            clearTimeout(timeout);
+            wakePoll = null;
+            resolve();
+          };
+        });
+      }
+    } finally {
+      pollLoopRunning = false;
+      wakePoll = null;
     }
   }
 
@@ -309,17 +384,14 @@ export function createWorker(
         { workflowNames },
         (count) => {
           if (count > 0 && running) {
-            // There are pending workflows, trigger a poll
-            if (pollTimeout) {
-              clearTimeout(pollTimeout);
-            }
-            poll();
+            // There are pending workflows, wake the poll loop.
+            triggerPoll();
           }
         }
       );
 
       // Start polling
-      poll();
+      triggerPoll();
     },
 
     /**
@@ -327,10 +399,7 @@ export function createWorker(
      */
     stop: () => {
       running = false;
-      if (pollTimeout) {
-        clearTimeout(pollTimeout);
-        pollTimeout = null;
-      }
+      if (wakePoll) wakePoll();
       if (unsubscribe) {
         unsubscribe();
         unsubscribe = null;
@@ -372,7 +441,7 @@ export function createWorker(
 // ============================================================================
 
 function createWorkflowHandle(
-  client: ConvexClient,
+  client: ConvexWorkerClient,
   orchestratorApi: OrchestratorApi,
   workflowId: string
 ): WorkflowHandle {
@@ -435,6 +504,8 @@ function sleep(ms: number): Promise<void> {
  * Expose orchestrator API for use from Convex functions or frontend
  * This creates wrapper functions that the worker can call
  */
+export type WorkerAuthorizeFn = (ctx: any, args: any) => boolean | Promise<boolean>;
+
 export function exposeApi(component: ComponentApi) {
   return {
     startWorkflow: mutationGeneric({
@@ -444,98 +515,6 @@ export function exposeApi(component: ComponentApi) {
       },
       handler: async (ctx, args) => {
         return await ctx.runMutation(component.lib.startWorkflow, args);
-      },
-    }),
-
-    claimWorkflow: mutationGeneric({
-      args: {
-        workflowNames: v.array(v.string()),
-        workerId: v.string(),
-      },
-      handler: async (ctx, args) => {
-        return await ctx.runMutation(component.lib.claimWorkflow, args);
-      },
-    }),
-
-    heartbeat: mutationGeneric({
-      args: {
-        workflowId: v.string(),
-        workerId: v.string(),
-      },
-      handler: async (ctx, args) => {
-        return await ctx.runMutation(component.lib.heartbeat, {
-          workflowId: args.workflowId as any,
-          workerId: args.workerId,
-        });
-      },
-    }),
-
-    completeWorkflow: mutationGeneric({
-      args: {
-        workflowId: v.string(),
-        workerId: v.string(),
-        output: v.any(),
-      },
-      handler: async (ctx, args) => {
-        return await ctx.runMutation(component.lib.completeWorkflow, {
-          workflowId: args.workflowId as any,
-          workerId: args.workerId,
-          output: args.output,
-        });
-      },
-    }),
-
-    failWorkflow: mutationGeneric({
-      args: {
-        workflowId: v.string(),
-        workerId: v.string(),
-        error: v.string(),
-      },
-      handler: async (ctx, args) => {
-        return await ctx.runMutation(component.lib.failWorkflow, {
-          workflowId: args.workflowId as any,
-          workerId: args.workerId,
-          error: args.error,
-        });
-      },
-    }),
-
-    getOrCreateStep: mutationGeneric({
-      args: {
-        workflowId: v.string(),
-        stepName: v.string(),
-      },
-      handler: async (ctx, args) => {
-        return await ctx.runMutation(component.lib.getOrCreateStep, {
-          workflowId: args.workflowId as any,
-          stepName: args.stepName,
-        });
-      },
-    }),
-
-    completeStep: mutationGeneric({
-      args: {
-        stepId: v.string(),
-        output: v.any(),
-      },
-      handler: async (ctx, args) => {
-        return await ctx.runMutation(component.lib.completeStep, {
-          stepId: args.stepId as any,
-          output: args.output,
-        });
-      },
-    }),
-
-    failStep: mutationGeneric({
-      args: {
-        stepId: v.string(),
-        error: v.string(),
-      },
-      handler: async (ctx, args) => {
-        return await ctx.runMutation(component.lib.failStep, {
-          stepId: args.stepId as any,
-          error: args.error,
-        });
       },
     }),
 
@@ -577,12 +556,135 @@ export function exposeApi(component: ComponentApi) {
         });
       },
     }),
+  };
+}
+
+export function exposeApiWithWorker(
+  component: ComponentApi,
+  options: { authorize: WorkerAuthorizeFn }
+) {
+  const publicApi = exposeApi(component);
+
+  const authorize = options.authorize;
+  const ensureAuthorized = async (ctx: any, args: any) => {
+    const ok = await authorize(ctx, args);
+    if (!ok) throw new Error("Unauthorized worker call");
+  };
+
+  return {
+    ...publicApi,
+
+    claimWorkflow: mutationGeneric({
+      args: {
+        workflowNames: v.array(v.string()),
+        workerId: v.string(),
+      },
+      handler: async (ctx, args) => {
+        await ensureAuthorized(ctx, args);
+        return await ctx.runMutation(component.lib.claimWorkflow, args);
+      },
+    }),
+
+    heartbeat: mutationGeneric({
+      args: {
+        workflowId: v.string(),
+        workerId: v.string(),
+      },
+      handler: async (ctx, args) => {
+        await ensureAuthorized(ctx, args);
+        return await ctx.runMutation(component.lib.heartbeat, {
+          workflowId: args.workflowId as any,
+          workerId: args.workerId,
+        });
+      },
+    }),
+
+    completeWorkflow: mutationGeneric({
+      args: {
+        workflowId: v.string(),
+        workerId: v.string(),
+        output: v.any(),
+      },
+      handler: async (ctx, args) => {
+        await ensureAuthorized(ctx, args);
+        return await ctx.runMutation(component.lib.completeWorkflow, {
+          workflowId: args.workflowId as any,
+          workerId: args.workerId,
+          output: args.output,
+        });
+      },
+    }),
+
+    failWorkflow: mutationGeneric({
+      args: {
+        workflowId: v.string(),
+        workerId: v.string(),
+        error: v.string(),
+      },
+      handler: async (ctx, args) => {
+        await ensureAuthorized(ctx, args);
+        return await ctx.runMutation(component.lib.failWorkflow, {
+          workflowId: args.workflowId as any,
+          workerId: args.workerId,
+          error: args.error,
+        });
+      },
+    }),
+
+    getOrCreateStep: mutationGeneric({
+      args: {
+        workflowId: v.string(),
+        stepName: v.string(),
+        workerId: v.string(),
+      },
+      handler: async (ctx, args) => {
+        await ensureAuthorized(ctx, args);
+        return await ctx.runMutation(component.lib.getOrCreateStep, {
+          workflowId: args.workflowId as any,
+          stepName: args.stepName,
+          workerId: args.workerId,
+        });
+      },
+    }),
+
+    completeStep: mutationGeneric({
+      args: {
+        stepId: v.string(),
+        workerId: v.string(),
+        output: v.any(),
+      },
+      handler: async (ctx, args) => {
+        await ensureAuthorized(ctx, args);
+        return await ctx.runMutation(component.lib.completeStep, {
+          stepId: args.stepId as any,
+          workerId: args.workerId,
+          output: args.output,
+        });
+      },
+    }),
+
+    failStep: mutationGeneric({
+      args: {
+        stepId: v.string(),
+        workerId: v.string(),
+        error: v.string(),
+      },
+      handler: async (ctx, args) => {
+        await ensureAuthorized(ctx, args);
+        return await ctx.runMutation(component.lib.failStep, {
+          stepId: args.stepId as any,
+          workerId: args.workerId,
+          error: args.error,
+        });
+      },
+    }),
 
     subscribePendingWorkflows: queryGeneric({
       args: {
         workflowNames: v.array(v.string()),
       },
       handler: async (ctx, args) => {
+        await ensureAuthorized(ctx, args);
         return await ctx.runQuery(component.lib.subscribePendingWorkflows, args);
       },
     }),

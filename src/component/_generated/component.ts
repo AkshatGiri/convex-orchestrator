@@ -34,7 +34,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       completeStep: FunctionReference<
         "mutation",
         "internal",
-        { output: any; stepId: string },
+        { output: any; stepId: string; workerId: string },
         boolean,
         Name
       >;
@@ -48,7 +48,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       failStep: FunctionReference<
         "mutation",
         "internal",
-        { error: string; stepId: string },
+        { error: string; stepId: string; workerId: string },
         boolean,
         Name
       >;
@@ -62,7 +62,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
       getOrCreateStep: FunctionReference<
         "mutation",
         "internal",
-        { stepName: string; workflowId: string },
+        { stepName: string; workerId: string; workflowId: string },
         {
           error?: string;
           isNew: boolean;

@@ -54,10 +54,16 @@ describe("orchestrator component", () => {
       input: {},
     });
 
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+
     // Create a step
     const step1 = await t.mutation(api.lib.getOrCreateStep, {
       workflowId,
       stepName: "step-1",
+      workerId: "worker-1",
     });
     expect(step1.isNew).toBe(true);
     expect(step1.status).toEqual("running");
@@ -65,6 +71,7 @@ describe("orchestrator component", () => {
     // Complete the step
     await t.mutation(api.lib.completeStep, {
       stepId: step1.stepId,
+      workerId: "worker-1",
       output: { result: "success" },
     });
 
@@ -72,10 +79,57 @@ describe("orchestrator component", () => {
     const step1Again = await t.mutation(api.lib.getOrCreateStep, {
       workflowId,
       stepName: "step-1",
+      workerId: "worker-1",
     });
     expect(step1Again.isNew).toBe(false);
     expect(step1Again.status).toEqual("completed");
     expect(step1Again.output).toEqual({ result: "success" });
+  });
+
+  test("rejects step operations from non-owner worker", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: {},
+    });
+
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+
+    const step = await t.mutation(api.lib.getOrCreateStep, {
+      workflowId,
+      stepName: "step-1",
+      workerId: "worker-1",
+    });
+
+    const ok = await t.mutation(api.lib.completeStep, {
+      stepId: step.stepId,
+      workerId: "worker-2",
+      output: { result: "nope" },
+    });
+    expect(ok).toBe(false);
+
+    const steps = await t.query(api.lib.getWorkflowSteps, { workflowId });
+    expect(steps).toHaveLength(1);
+    expect(steps[0].status).toBe("running");
+  });
+
+  test("rejects step creation when workflow not claimed by worker", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: {},
+    });
+
+    await expect(
+      t.mutation(api.lib.getOrCreateStep, {
+        workflowId,
+        stepName: "step-1",
+        workerId: "worker-1",
+      })
+    ).rejects.toThrow(/not claimed/i);
   });
 
   test("can complete a workflow", async () => {

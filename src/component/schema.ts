@@ -23,11 +23,15 @@ export default defineSchema({
     input: v.any(), // JSON input to the workflow
     output: v.optional(v.any()), // JSON output when completed
     error: v.optional(v.string()), // error message if failed
-    claimedBy: v.optional(v.string()), // worker ID that's running this
-    claimedAt: v.optional(v.number()), // when it was claimed (for timeout)
+    claimedBy: v.optional(v.union(v.string(), v.null())), // worker ID that's running this
+    claimedAt: v.optional(v.union(v.number(), v.null())), // last heartbeat/claim time
+    leaseExpiresAt: v.optional(v.union(v.number(), v.null())), // for efficient reclaiming
+    // Used to prevent duplicate step rows under concurrency.
+    stepIdsByName: v.optional(v.record(v.string(), v.id("steps"))),
   })
     .index("status", ["status"])
-    .index("name_status", ["name", "status"]),
+    .index("name_status", ["name", "status"])
+    .index("name_status_leaseExpiresAt", ["name", "status", "leaseExpiresAt"]),
 
   // Individual step executions within a workflow
   steps: defineTable({

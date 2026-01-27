@@ -47,6 +47,7 @@ export const claimWorkflow = mutation({
   ),
   handler: async (ctx, args) => {
     const now = Date.now();
+    const leaseExpiresAt = now + CLAIM_TIMEOUT_MS;
 
     // First, try to find a pending workflow
     for (const name of args.workflowNames) {
@@ -60,6 +61,7 @@ export const claimWorkflow = mutation({
           status: "running",
           claimedBy: args.workerId,
           claimedAt: now,
+          leaseExpiresAt,
         });
         return {
           workflowId: pending._id,
@@ -71,17 +73,44 @@ export const claimWorkflow = mutation({
 
     // Check for abandoned workflows (claimed but timed out)
     for (const name of args.workflowNames) {
-      const running = await ctx.db
+      const expired = await ctx.db
+        .query("workflows")
+        .withIndex("name_status_leaseExpiresAt", (q) =>
+          q
+            .eq("name", name)
+            .eq("status", "running")
+            .lt("leaseExpiresAt", now)
+        )
+        .first();
+
+      if (expired) {
+        await ctx.db.patch(expired._id, {
+          claimedBy: args.workerId,
+          claimedAt: now,
+          leaseExpiresAt,
+        });
+        return {
+          workflowId: expired._id,
+          name: expired.name,
+          input: expired.input,
+        };
+      }
+
+      // Back-compat: reclaim older running workflows missing leaseExpiresAt.
+      const legacyRunning = await ctx.db
         .query("workflows")
         .withIndex("name_status", (q) => q.eq("name", name).eq("status", "running"))
-        .collect();
-
-      for (const workflow of running) {
-        if (workflow.claimedAt && now - workflow.claimedAt > CLAIM_TIMEOUT_MS) {
-          // Workflow was abandoned, reclaim it
+        .take(25);
+      for (const workflow of legacyRunning) {
+        if (
+          (workflow.leaseExpiresAt == null) &&
+          workflow.claimedAt != null &&
+          now - workflow.claimedAt > CLAIM_TIMEOUT_MS
+        ) {
           await ctx.db.patch(workflow._id, {
             claimedBy: args.workerId,
             claimedAt: now,
+            leaseExpiresAt,
           });
           return {
             workflowId: workflow._id,
@@ -112,6 +141,7 @@ export const heartbeat = mutation({
     }
     await ctx.db.patch(args.workflowId, {
       claimedAt: Date.now(),
+      leaseExpiresAt: Date.now() + CLAIM_TIMEOUT_MS,
     });
     return true;
   },
@@ -135,8 +165,9 @@ export const completeWorkflow = mutation({
     await ctx.db.patch(args.workflowId, {
       status: "completed",
       output: args.output,
-      claimedBy: undefined,
-      claimedAt: undefined,
+      claimedBy: null,
+      claimedAt: null,
+      leaseExpiresAt: null,
     });
     return true;
   },
@@ -160,8 +191,9 @@ export const failWorkflow = mutation({
     await ctx.db.patch(args.workflowId, {
       status: "failed",
       error: args.error,
-      claimedBy: undefined,
-      claimedAt: undefined,
+      claimedBy: null,
+      claimedAt: null,
+      leaseExpiresAt: null,
     });
     return true;
   },
@@ -255,6 +287,7 @@ export const getOrCreateStep = mutation({
   args: {
     workflowId: v.id("workflows"),
     stepName: v.string(),
+    workerId: v.string(),
   },
   returns: v.object({
     stepId: v.id("steps"),
@@ -264,22 +297,23 @@ export const getOrCreateStep = mutation({
     isNew: v.boolean(),
   }),
   handler: async (ctx, args) => {
-    // Check if step already exists
-    const existing = await ctx.db
-      .query("steps")
-      .withIndex("workflowId_name", (q) =>
-        q.eq("workflowId", args.workflowId).eq("name", args.stepName)
-      )
-      .first();
+    const workflow = await ctx.db.get(args.workflowId);
+    if (!workflow || workflow.status !== "running" || workflow.claimedBy !== args.workerId) {
+      throw new Error("Workflow not claimed by worker");
+    }
 
-    if (existing) {
-      return {
-        stepId: existing._id,
-        status: existing.status,
-        output: existing.output,
-        error: existing.error,
-        isNew: false,
-      };
+    const existingStepId = workflow.stepIdsByName?.[args.stepName];
+    if (existingStepId) {
+      const step = await ctx.db.get(existingStepId);
+      if (step) {
+        return {
+          stepId: step._id,
+          status: step.status,
+          output: step.output,
+          error: step.error,
+          isNew: false,
+        };
+      }
     }
 
     // Create new step
@@ -289,6 +323,13 @@ export const getOrCreateStep = mutation({
       status: "running",
       attempts: 1,
       startedAt: Date.now(),
+    });
+
+    await ctx.db.patch(args.workflowId, {
+      stepIdsByName: {
+        ...(workflow.stepIdsByName ?? {}),
+        [args.stepName]: stepId,
+      },
     });
 
     return {
@@ -307,12 +348,17 @@ export const getOrCreateStep = mutation({
 export const completeStep = mutation({
   args: {
     stepId: v.id("steps"),
+    workerId: v.string(),
     output: v.any(),
   },
   returns: v.boolean(),
   handler: async (ctx, args) => {
     const step = await ctx.db.get(args.stepId);
-    if (!step || step.status === "completed") {
+    if (!step || step.status !== "running") {
+      return false;
+    }
+    const workflow = await ctx.db.get(step.workflowId);
+    if (!workflow || workflow.status !== "running" || workflow.claimedBy !== args.workerId) {
       return false;
     }
     await ctx.db.patch(args.stepId, {
@@ -330,12 +376,17 @@ export const completeStep = mutation({
 export const failStep = mutation({
   args: {
     stepId: v.id("steps"),
+    workerId: v.string(),
     error: v.string(),
   },
   returns: v.boolean(),
   handler: async (ctx, args) => {
     const step = await ctx.db.get(args.stepId);
-    if (!step) {
+    if (!step || step.status !== "running") {
+      return false;
+    }
+    const workflow = await ctx.db.get(step.workflowId);
+    if (!workflow || workflow.status !== "running" || workflow.claimedBy !== args.workerId) {
       return false;
     }
     await ctx.db.patch(args.stepId, {
@@ -400,14 +451,13 @@ export const subscribePendingWorkflows = query({
   },
   returns: v.number(), // just return count, triggers re-subscription
   handler: async (ctx, args) => {
-    let count = 0;
     for (const name of args.workflowNames) {
       const pending = await ctx.db
         .query("workflows")
         .withIndex("name_status", (q) => q.eq("name", name).eq("status", "pending"))
-        .collect();
-      count += pending.length;
+        .first();
+      if (pending) return 1;
     }
-    return count;
+    return 0;
   },
 });
