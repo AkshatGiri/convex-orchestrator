@@ -1,88 +1,23 @@
-# Convex Component Template
+# @akshatgiri/convex-orchestrator
 
-This is a Convex component, ready to be published on npm.
+Durable workflow orchestration on Convex where *step execution happens on your machines* (workers pull work from Convex), inspired by Temporal’s worker model.
 
-To create your own component:
+This project is early-stage. The API may change.
 
-1. Write code in src/component for your component. Component-specific tables,
-   queries, mutations, and actions go here.
-1. Write code in src/client for the Class that interfaces with the component.
-   This is the bridge your users will access to get information into and out of
-   your component
-1. Write example usage in example/convex/example.ts.
-1. Delete the text in this readme until `---` and flesh out the README.
-1. Publish to npm with `npm run alpha` or `npm run release`.
+## What you get
 
-To develop your component run a dev process in the example project:
+- Durable workflow runs stored in Convex (`workflows` + `steps` tables)
+- A worker SDK (`createWorker`, `workflow`, `ctx.step`) that executes activities locally and records step results durably
+- Leasing + heartbeats so workflows can be reclaimed if a worker dies
+- Simple dashboard primitives: list workflows, view workflow + steps
+
+## Install
 
 ```sh
-npm i
-npm run dev
+npm i @akshatgiri/convex-orchestrator
 ```
 
-`npm i` will do the install and an initial build. `npm run dev` will start a
-file watcher to re-build the component, as well as the example project frontend
-and backend, which does codegen and installs the component.
-
-Modify the schema and index files in src/component/ to define your component.
-
-Write a client for using this component in src/client/index.ts.
-
-If you won't be adding frontend code (e.g. React components) to this component
-you can delete "./react" references in package.json and "src/react/" directory.
-If you will be adding frontend code, add a peer dependency on React in
-package.json.
-
-### Component Directory structure
-
-```
-.
-├── README.md           documentation of your component
-├── package.json        component name, version number, other metadata
-├── package-lock.json   Components are like libraries, package-lock.json
-│                       is .gitignored and ignored by consumers.
-├── src
-│   ├── component/
-│   │   ├── _generated/ Files here are generated for the component.
-│   │   ├── convex.config.ts  Name your component here and use other components
-│   │   ├── lib.ts    Define functions here and in new files in this directory
-│   │   └── schema.ts   schema specific to this component
-│   ├── client/
-│   │   └── index.ts    Code that needs to run in the app that uses the
-│   │                   component. Generally the app interacts directly with
-│   │                   the component's exposed API (src/component/*).
-│   └── react/          Code intended to be used on the frontend goes here.
-│       │               Your are free to delete this if this component
-│       │               does not provide code.
-│       └── index.ts
-├── example/            example Convex app that uses this component
-│   └── convex/
-│       ├── _generated/       Files here are generated for the example app.
-│       ├── convex.config.ts  Imports and uses this component
-│       ├── myFunctions.ts    Functions that use the component
-│       └── schema.ts         Example app schema
-└── dist/               Publishing artifacts will be created here.
-```
-
----
-
-# Convex Convex Orchestrator
-
-[![npm version](https://badge.fury.io/js/@example%2Fconvex-orchestrator.svg)](https://badge.fury.io/js/@example%2Fconvex-orchestrator)
-
-<!-- START: Include on https://convex.dev/components -->
-
-- [ ] What is some compelling syntax as a hook?
-- [ ] Why should you use this component?
-- [ ] Links to docs / other resources?
-
-Found a bug? Feature request?
-[File it here](https://github.com/akshatgiri/convex-orchestrator/issues).
-
-## Installation
-
-Create a `convex.config.ts` file in your app's `convex/` folder and install the
-component by calling `use`:
+## Add the component to your Convex app
 
 ```ts
 // convex/convex.config.ts
@@ -95,52 +30,99 @@ app.use(convexOrchestrator);
 export default app;
 ```
 
-## Usage
+## Expose API from your app
+
+Create a module in your Convex app (for example `convex/orchestrator.ts`) and export:
 
 ```ts
-import { components } from "./_generated/api";
+// convex/orchestrator.ts
+import { components } from "./_generated/api.js";
+import { exposeApi, exposeApiWithWorker } from "@akshatgiri/convex-orchestrator";
 
-export const addComment = mutation({
-  args: { text: v.string(), targetId: v.string() },
-  handler: async (ctx, args) => {
-    return await ctx.runMutation(components.convexOrchestrator.lib.add, {
-      text: args.text,
-      targetId: args.targetId,
-      userId: await getAuthUserId(ctx),
-    });
+// Safe to expose to clients (dashboard + starters)
+export const { startWorkflow, getWorkflow, listWorkflows, getWorkflowSteps } =
+  exposeApi(components.convexOrchestrator);
+
+// Worker operations (DO NOT expose without auth in production)
+export const {
+  claimWorkflow,
+  heartbeat,
+  completeWorkflow,
+  failWorkflow,
+  getOrCreateStep,
+  completeStep,
+  failStep,
+  subscribePendingWorkflows,
+} = exposeApiWithWorker(components.convexOrchestrator, {
+  authorize: async (ctx) => {
+    // TODO: implement real auth (service token / identity / secret)
+    // Returning true is fine for local dev, unsafe for production.
+    void ctx;
+    return true;
   },
 });
 ```
 
-See more example usage in [example.ts](./example/convex/example.ts).
-
-### HTTP Routes
-
-You can register HTTP routes for the component to expose HTTP endpoints:
+## Define workflows
 
 ```ts
-import { httpRouter } from "convex/server";
-import { registerRoutes } from "@akshatgiri/convex-orchestrator";
-import { components } from "./_generated/api";
+import { workflow } from "@akshatgiri/convex-orchestrator";
 
-const http = httpRouter();
-
-registerRoutes(http, components.convexOrchestrator, {
-  pathPrefix: "/comments",
+const greet = workflow("greet", async (ctx, input: { name: string }) => {
+  const greeting = await ctx.step("greeting", async () => `Hello, ${input.name}!`);
+  return { greeting };
 });
-
-export default http;
 ```
 
-This will expose a GET endpoint that returns the most recent comment as JSON.
-The endpoint requires a `targetId` query parameter. See
-[http.ts](./example/convex/http.ts) for a complete example.
+## Run a worker (on your machine)
 
-<!-- END: Include on https://convex.dev/components -->
+```ts
+import { ConvexClient } from "convex/browser";
+import { createWorker } from "@akshatgiri/convex-orchestrator";
+import { api } from "./convex/_generated/api.js";
 
-Run the example:
+const client = new ConvexClient(process.env.CONVEX_URL!);
+
+const worker = createWorker(client, api.orchestrator, { workflows: [greet] });
+await worker.start();
+```
+
+## Start a workflow
+
+From any Convex client:
+
+```ts
+await client.mutation(api.orchestrator.startWorkflow, {
+  name: "greet",
+  input: { name: "World" },
+});
+```
+
+## Execution model (important)
+
+- `ctx.step("name", fn)` is durable: the first successful result is stored and returned on replay.
+- Steps are **at-least-once** from the perspective of your side effects. Make your step code idempotent.
+- Workers hold a **lease** and heartbeat while executing. If the lease expires, another worker may reclaim the workflow; the original worker should stop writing results.
+
+## Demo (this repo)
 
 ```sh
 npm i
 npm run dev
 ```
+
+In another terminal:
+
+```sh
+bun example/worker.ts
+bun example/trigger.ts greet
+```
+
+## Limitations / TODOs
+
+- No durable timers/sleep, signals, parallel DAG execution, or retries/backoff yet
+- No built-in worker authentication/authorization (you must enforce this in your app)
+
+## Contributing
+
+Issues/PRs welcome: https://github.com/akshatgiri/convex-orchestrator/issues
