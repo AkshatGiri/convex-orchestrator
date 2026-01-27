@@ -12,7 +12,7 @@
 import { ConvexClient } from "convex/browser";
 import { api } from "./convex/_generated/api.js";
 
-const CONVEX_URL = process.env.CONVEX_URL;
+const CONVEX_URL = process.env.CONVEX_URL as string;
 if (!CONVEX_URL) {
   console.error("CONVEX_URL environment variable is required");
   process.exit(1);

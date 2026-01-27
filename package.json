@@ -29,7 +29,7 @@
     "test:watch": "vitest --typecheck --clearScreen false",
     "test:debug": "vitest --inspect-brk --no-file-parallelism",
     "test:coverage": "vitest run --coverage --coverage.reporter=text",
-    "preversion": "npm install --no-package-lock && npm run build:clean && run-p test lint typecheck",
+    "preversion": "npm ci && npm run build:clean && run-p test lint typecheck",
     "prepublishOnly": "npm whoami || npm login",
     "prepare": "npm run build",
     "prepack": "npm run build",
