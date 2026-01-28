@@ -11,18 +11,42 @@ export type { ComponentApi };
 // Types
 // ============================================================================
 
-export type WorkflowStatus = "pending" | "running" | "completed" | "failed";
+export type WorkflowStatus =
+  | "pending"
+  | "running"
+  | "sleeping"
+  | "completed"
+  | "failed";
 export type StepStatus = "pending" | "running" | "completed" | "failed";
+
+/**
+ * Error thrown when a workflow goes to sleep
+ * This is caught by the worker to gracefully stop execution
+ */
+export class WorkflowSleepError extends Error {
+  constructor(public readonly wakeTime: number) {
+    super(`Workflow sleeping until ${wakeTime}`);
+    this.name = "WorkflowSleepError";
+  }
+}
 
 export interface WorkflowContext<TInput> {
   input: TInput;
   workflowId: string;
   step: <T>(name: string, fn: () => T | Promise<T>) => Promise<T>;
+  sleep: {
+    (durationMs: number): Promise<void>;
+    (marker: string, durationMs: number): Promise<void>;
+  };
+  sleepUntil: {
+    (timestamp: number | Date): Promise<void>;
+    (marker: string, timestamp: number | Date): Promise<void>;
+  };
 }
 
 export type WorkflowFunction<TInput, TOutput> = (
   ctx: WorkflowContext<TInput>,
-  input: TInput
+  input: TInput,
 ) => Promise<TOutput>;
 
 export interface WorkflowDefinition<TInput = unknown, TOutput = unknown> {
@@ -48,7 +72,12 @@ export interface ConvexWorkerClient {
 
 // API type that workers need to operate
 export interface OrchestratorApi {
-  startWorkflow: FunctionReference<"mutation", "public", { name: string; input: any }, string>;
+  startWorkflow: FunctionReference<
+    "mutation",
+    "public",
+    { name: string; input: any },
+    string
+  >;
   claimWorkflow: FunctionReference<
     "mutation",
     "public",
@@ -77,7 +106,20 @@ export interface OrchestratorApi {
     "mutation",
     "public",
     { workflowId: string; stepName: string; workerId: string },
-    { stepId: string; status: StepStatus; output?: any; error?: string; isNew: boolean }
+    {
+      stepId: string;
+      status: StepStatus;
+      output?: any;
+      error?: string;
+      sleepUntil?: number;
+      isNew: boolean;
+    }
+  >;
+  scheduleSleep: FunctionReference<
+    "mutation",
+    "public",
+    { workflowId: string; stepId: string; workerId: string; sleepUntil: number },
+    boolean
   >;
   completeStep: FunctionReference<
     "mutation",
@@ -91,11 +133,27 @@ export interface OrchestratorApi {
     { stepId: string; workerId: string; error: string },
     boolean
   >;
+  sleepWorkflow: FunctionReference<
+    "mutation",
+    "public",
+    { workflowId: string; workerId: string; sleepUntil: number },
+    boolean
+  >;
   getWorkflow: FunctionReference<
     "query",
     "public",
     { workflowId: string },
-    { _id: string; _creationTime: number; name: string; status: WorkflowStatus; input: any; output?: any; error?: string } | null
+    {
+      _id: string;
+      _creationTime: number;
+      name: string;
+      status: WorkflowStatus;
+      input: any;
+      output?: any;
+      error?: string;
+      claimedBy?: string | null;
+      sleepUntil?: number;
+    } | null
   >;
   subscribePendingWorkflows: FunctionReference<
     "query",
@@ -144,7 +202,7 @@ export interface WorkerOptions {
  */
 export function workflow<TInput, TOutput>(
   name: string,
-  fn: WorkflowFunction<TInput, TOutput>
+  fn: WorkflowFunction<TInput, TOutput>,
 ): WorkflowDefinition<TInput, TOutput> {
   return { name, fn };
 }
@@ -168,7 +226,7 @@ export function workflow<TInput, TOutput>(
 export function createWorker(
   client: ConvexWorkerClient,
   orchestratorApi: OrchestratorApi,
-  options: WorkerOptions
+  options: WorkerOptions,
 ) {
   const workerId = generateWorkerId();
   const workflows = new Map<string, WorkflowDefinition>();
@@ -190,7 +248,7 @@ export function createWorker(
   async function executeWorkflow(
     workflowId: string,
     workflowName: string,
-    input: unknown
+    input: unknown,
   ) {
     const workflowDef = workflows.get(workflowName);
     if (!workflowDef) {
@@ -199,8 +257,10 @@ export function createWorker(
     }
 
     const claimState = { lost: false };
+    let executingStepName: string | null = null;
+    const sleepPrefix = "__sleep:";
 
-    // Create the context with step function
+    // Create the context with step function and sleep functions
     const ctx: WorkflowContext<unknown> = {
       input,
       workflowId,
@@ -209,11 +269,14 @@ export function createWorker(
           throw new Error("Workflow claim lost");
         }
         // Check if step already completed
-        const stepInfo = await client.mutation(orchestratorApi.getOrCreateStep, {
-          workflowId,
-          stepName: name,
-          workerId,
-        });
+        const stepInfo = await client.mutation(
+          orchestratorApi.getOrCreateStep,
+          {
+            workflowId,
+            stepName: name,
+            workerId,
+          },
+        );
 
         if (claimState.lost) {
           throw new Error("Workflow claim lost");
@@ -231,6 +294,7 @@ export function createWorker(
 
         // Execute the step
         try {
+          executingStepName = name;
           const result = await fn();
 
           if (claimState.lost) {
@@ -260,7 +324,103 @@ export function createWorker(
             // ignore
           }
           throw error;
+        } finally {
+          executingStepName = null;
         }
+      },
+      sleep: async (...args: [number] | [string, number]) => {
+        if (executingStepName) {
+          throw new Error(
+            `ctx.sleep() cannot be called inside ctx.step("${executingStepName}"). ` +
+              `Move the sleep outside of ctx.step and make it its own top-level await.`,
+          );
+        }
+
+        if (args.length === 1) {
+          throw new Error(
+            `ctx.sleep(durationMs) is not replay-safe. Use ctx.sleep(marker, durationMs) instead.`,
+          );
+        }
+
+        const [marker, durationMs] = args;
+        if (durationMs <= 0) {
+          console.warn(
+            `[convex-orchestrator] sleep(${durationMs}) called with non-positive duration, continuing immediately`,
+          );
+          return;
+        }
+
+        await ctx.sleepUntil(marker, Date.now() + durationMs);
+      },
+      sleepUntil: async (
+        ...args: [number | Date] | [string, number | Date]
+      ) => {
+        if (executingStepName) {
+          throw new Error(
+            `ctx.sleepUntil() cannot be called inside ctx.step("${executingStepName}"). ` +
+              `Move the sleep outside of ctx.step and make it its own top-level await.`,
+          );
+        }
+
+        if (args.length === 1) {
+          throw new Error(
+            `ctx.sleepUntil(timestamp) is not replay-safe. Use ctx.sleepUntil(marker, timestamp) instead.`,
+          );
+        }
+
+        const [marker, timestamp] = args;
+        const ts =
+          typeof timestamp === "number" ? timestamp : timestamp.getTime();
+        if (ts <= Date.now()) {
+          console.warn(
+            `[convex-orchestrator] sleepUntil(${ts}) called with time in the past, continuing immediately`,
+          );
+          return;
+        }
+        if (claimState.lost) {
+          throw new Error("Workflow claim lost");
+        }
+
+        const stepName = `${sleepPrefix}${marker}`;
+        const stepInfo = await client.mutation(orchestratorApi.getOrCreateStep, {
+          workflowId,
+          stepName,
+          workerId,
+        });
+
+        if (!stepInfo.isNew && stepInfo.status === "completed") {
+          return;
+        }
+        if (!stepInfo.isNew && stepInfo.status === "failed") {
+          throw new Error(stepInfo.error ?? "Sleep marker step failed");
+        }
+
+        const sleepUntil = stepInfo.sleepUntil ?? ts;
+        if (sleepUntil <= Date.now()) {
+          // We're already past the wake time; complete the marker and continue.
+          const ok = await client.mutation(orchestratorApi.completeStep, {
+            stepId: stepInfo.stepId,
+            workerId,
+            output: { sleepUntil },
+          });
+          if (!ok) {
+            throw new Error("Failed to complete sleep marker (claim lost?)");
+          }
+          return;
+        }
+
+        const ok = await client.mutation(orchestratorApi.scheduleSleep, {
+          workflowId,
+          stepId: stepInfo.stepId,
+          workerId,
+          sleepUntil,
+        });
+        if (!ok) {
+          throw new Error("Failed to schedule workflow sleep (claim lost?)");
+        }
+
+        // Stop execution - workflow will be resumed later
+        throw new WorkflowSleepError(sleepUntil);
       },
     };
 
@@ -306,6 +466,13 @@ export function createWorker(
       if (claimState.lost) {
         return;
       }
+      // Check if this is a sleep error - if so, workflow is now sleeping
+      if (error instanceof WorkflowSleepError) {
+        console.log(
+          `Workflow ${workflowId} is sleeping until ${error.wakeTime}`,
+        );
+        return;
+      }
       // Mark workflow as failed
       const ok = await client.mutation(orchestratorApi.failWorkflow, {
         workflowId,
@@ -345,12 +512,12 @@ export function createWorker(
 
           if (claimed) {
             console.log(
-              `Claimed workflow: ${claimed.workflowId} (${claimed.name})`
+              `Claimed workflow: ${claimed.workflowId} (${claimed.name})`,
             );
             await executeWorkflow(
               claimed.workflowId,
               claimed.name,
-              claimed.input
+              claimed.input,
             );
             continue;
           }
@@ -397,7 +564,7 @@ export function createWorker(
             // There are pending workflows, wake the poll loop.
             triggerPoll();
           }
-        }
+        },
       );
 
       // Start polling
@@ -422,7 +589,7 @@ export function createWorker(
      */
     startWorkflow: async <TInput>(
       workflowName: string,
-      input: TInput
+      input: TInput,
     ): Promise<WorkflowHandle> => {
       const workflowId = await client.mutation(orchestratorApi.startWorkflow, {
         name: workflowName,
@@ -453,7 +620,7 @@ export function createWorker(
 function createWorkflowHandle(
   client: ConvexWorkerClient,
   orchestratorApi: OrchestratorApi,
-  workflowId: string
+  workflowId: string,
 ): WorkflowHandle {
   return {
     workflowId,
@@ -514,7 +681,10 @@ function sleep(ms: number): Promise<void> {
  * Expose orchestrator API for use from Convex functions or frontend
  * This creates wrapper functions that the worker can call
  */
-export type WorkerAuthorizeFn = (ctx: any, args: any) => boolean | Promise<boolean>;
+export type WorkerAuthorizeFn = (
+  ctx: any,
+  args: any,
+) => boolean | Promise<boolean>;
 
 export function exposeApi(component: ComponentApi) {
   return {
@@ -545,9 +715,10 @@ export function exposeApi(component: ComponentApi) {
           v.union(
             v.literal("pending"),
             v.literal("running"),
+            v.literal("sleeping"),
             v.literal("completed"),
-            v.literal("failed")
-          )
+            v.literal("failed"),
+          ),
         ),
         limit: v.optional(v.number()),
       },
@@ -571,7 +742,7 @@ export function exposeApi(component: ComponentApi) {
 
 export function exposeApiWithWorker(
   component: ComponentApi,
-  options: { authorize: WorkerAuthorizeFn }
+  options: { authorize: WorkerAuthorizeFn },
 ) {
   const publicApi = exposeApi(component);
 
@@ -641,6 +812,22 @@ export function exposeApiWithWorker(
       },
     }),
 
+    sleepWorkflow: mutationGeneric({
+      args: {
+        workflowId: v.string(),
+        workerId: v.string(),
+        sleepUntil: v.number(),
+      },
+      handler: async (ctx, args) => {
+        await ensureAuthorized(ctx, args);
+        return await ctx.runMutation(component.lib.sleepWorkflow, {
+          workflowId: args.workflowId as any,
+          workerId: args.workerId,
+          sleepUntil: args.sleepUntil,
+        });
+      },
+    }),
+
     getOrCreateStep: mutationGeneric({
       args: {
         workflowId: v.string(),
@@ -653,6 +840,24 @@ export function exposeApiWithWorker(
           workflowId: args.workflowId as any,
           stepName: args.stepName,
           workerId: args.workerId,
+        });
+      },
+    }),
+
+    scheduleSleep: mutationGeneric({
+      args: {
+        workflowId: v.string(),
+        stepId: v.string(),
+        workerId: v.string(),
+        sleepUntil: v.number(),
+      },
+      handler: async (ctx, args) => {
+        await ensureAuthorized(ctx, args);
+        return await ctx.runMutation(component.lib.scheduleSleep, {
+          workflowId: args.workflowId as any,
+          stepId: args.stepId as any,
+          workerId: args.workerId,
+          sleepUntil: args.sleepUntil,
         });
       },
     }),
@@ -695,7 +900,10 @@ export function exposeApiWithWorker(
       },
       handler: async (ctx, args) => {
         await ensureAuthorized(ctx, args);
-        return await ctx.runQuery(component.lib.subscribePendingWorkflows, args);
+        return await ctx.runQuery(
+          component.lib.subscribePendingWorkflows,
+          args,
+        );
       },
     }),
   };

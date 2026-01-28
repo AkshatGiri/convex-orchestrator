@@ -167,7 +167,7 @@ const workflow = workflow("reminder", async (ctx, input) => {
   await ctx.step("send-welcome", () => activities.sendEmail(input.email, "Welcome!"));
 
   // Durable sleep - survives crashes
-  await ctx.sleep("24h");
+  await ctx.sleep("followup-delay", 24 * 60 * 60 * 1000);
 
   await ctx.step("send-followup", () => activities.sendEmail(input.email, "How's it going?"));
 });

@@ -147,6 +147,79 @@ const greetWorkflow = workflow("greet", async (ctx, input: { name: string }) => 
   return { greeting, timestamp };
 });
 
+// Stress test workflow with 100 steps
+const stressWorkflow = workflow("stress", async (ctx, input: { count: number }) => {
+  const stepCount = input.count || 100;
+  console.log(`\n🔥 Starting stress workflow with ${stepCount} steps`);
+
+  const results: Array<{ step: number; value: number; timestamp: string }> = [];
+
+  for (let i = 1; i <= stepCount; i++) {
+    const result = await ctx.step(`step-${i.toString().padStart(3, "0")}`, async () => {
+      // Simulate some work (fast, ~50ms each)
+      await sleep(50);
+      return {
+        step: i,
+        value: Math.floor(Math.random() * 1000),
+        timestamp: new Date().toISOString(),
+      };
+    });
+    results.push(result);
+
+    if (i % 10 === 0) {
+      console.log(`   Completed ${i}/${stepCount} steps`);
+    }
+  }
+
+  console.log(`✅ Stress workflow completed! Processed ${results.length} steps`);
+
+  return {
+    totalSteps: results.length,
+    firstStep: results[0],
+    lastStep: results[results.length - 1],
+    sum: results.reduce((acc, r) => acc + r.value, 0),
+  };
+});
+
+// Reminder workflow demonstrating ctx.sleep()
+interface ReminderInput {
+  message: string;
+  delaySeconds: number;
+}
+
+const reminderWorkflow = workflow("reminder", async (ctx, input: ReminderInput) => {
+  console.log(`\n⏰ Starting reminder workflow`);
+  console.log(`   Message: "${input.message}"`);
+  console.log(`   Delay: ${input.delaySeconds} seconds`);
+
+  // Step 1: Acknowledge the reminder was scheduled
+  const scheduledAt = await ctx.step("schedule", async () => {
+    const now = new Date().toISOString();
+    console.log(`   Reminder scheduled at ${now}`);
+    return now;
+  });
+
+  // Sleep for the specified duration (workflow pauses here)
+  console.log(`   💤 Sleeping for ${input.delaySeconds} seconds...`);
+  await ctx.sleep("delay", input.delaySeconds * 1000);
+  console.log(`   ⏰ Woke up!`);
+
+  // Step 2: Send the reminder
+  const reminder = await ctx.step("send-reminder", async () => {
+    const sentAt = new Date().toISOString();
+    console.log(`   🔔 REMINDER: ${input.message}`);
+    return {
+      message: input.message,
+      scheduledAt,
+      sentAt,
+    };
+  });
+
+  console.log(`✅ Reminder workflow completed!`);
+
+  return reminder;
+});
+
 // ============================================================================
 // Start the Worker
 // ============================================================================
@@ -160,7 +233,7 @@ async function main() {
 
   // Use the app's API (api.example) which wraps the component
   const worker = createWorker(client, api.example, {
-    workflows: [orderWorkflow, greetWorkflow],
+    workflows: [orderWorkflow, greetWorkflow, stressWorkflow, reminderWorkflow],
     pollIntervalMs: 2000,
   });
 

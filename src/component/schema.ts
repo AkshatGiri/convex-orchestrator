@@ -4,15 +4,16 @@ import { v } from "convex/values";
 export const workflowStatus = v.union(
   v.literal("pending"),
   v.literal("running"),
+  v.literal("sleeping"),
   v.literal("completed"),
-  v.literal("failed")
+  v.literal("failed"),
 );
 
 export const stepStatus = v.union(
   v.literal("pending"),
   v.literal("running"),
   v.literal("completed"),
-  v.literal("failed")
+  v.literal("failed"),
 );
 
 export default defineSchema({
@@ -28,11 +29,15 @@ export default defineSchema({
     leaseExpiresAt: v.optional(v.union(v.number(), v.null())), // for efficient reclaiming
     // Used to prevent duplicate step rows under concurrency.
     stepIdsByName: v.optional(v.record(v.string(), v.id("steps"))),
+    // When the workflow should wake up from sleeping state
+    sleepUntil: v.optional(v.number()),
   })
     .index("status", ["status"])
     .index("status_leaseExpiresAt", ["status", "leaseExpiresAt"])
     .index("name_status", ["name", "status"])
-    .index("name_status_leaseExpiresAt", ["name", "status", "leaseExpiresAt"]),
+    .index("name_status_leaseExpiresAt", ["name", "status", "leaseExpiresAt"])
+    .index("name_status_sleepUntil", ["name", "status", "sleepUntil"])
+    .index("status_sleepUntil", ["status", "sleepUntil"]),
 
   // Individual step executions within a workflow
   steps: defineTable({
@@ -41,6 +46,8 @@ export default defineSchema({
     status: stepStatus,
     output: v.optional(v.any()), // step result when completed
     error: v.optional(v.string()), // error if failed
+    // Only set for internal sleep markers (ctx.sleep / ctx.sleepUntil).
+    sleepUntil: v.optional(v.number()),
     attempts: v.number(), // retry count
     startedAt: v.optional(v.number()),
     completedAt: v.optional(v.number()),

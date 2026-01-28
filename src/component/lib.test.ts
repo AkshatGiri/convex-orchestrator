@@ -128,7 +128,7 @@ describe("orchestrator component", () => {
         workflowId,
         stepName: "step-1",
         workerId: "worker-1",
-      })
+      }),
     ).rejects.toThrow(/not claimed/i);
   });
 
@@ -398,5 +398,160 @@ describe("orchestrator component", () => {
     });
     expect(claimed3?.workflowId).toEqual(greet2);
     expect(claimed3?.name).toEqual("greet");
+  });
+
+  test("can put workflow to sleep", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: {},
+    });
+
+    // Claim the workflow
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+
+    // Put workflow to sleep
+    const sleepUntil = Date.now() + 60_000;
+    const ok = await t.mutation(api.lib.sleepWorkflow, {
+      workflowId,
+      workerId: "worker-1",
+      sleepUntil,
+    });
+    expect(ok).toBe(true);
+
+    const workflow = await t.query(api.lib.getWorkflow, { workflowId });
+    expect(workflow?.status).toEqual("sleeping");
+    expect(workflow?.sleepUntil).toEqual(sleepUntil);
+    expect(workflow?.claimedBy).toBeNull();
+  });
+
+  test("rejects sleep from non-owner worker", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: {},
+    });
+
+    // Claim the workflow
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+
+    // Try to sleep from different worker
+    const ok = await t.mutation(api.lib.sleepWorkflow, {
+      workflowId,
+      workerId: "worker-2",
+      sleepUntil: Date.now() + 60_000,
+    });
+    expect(ok).toBe(false);
+
+    const workflow = await t.query(api.lib.getWorkflow, { workflowId });
+    expect(workflow?.status).toEqual("running");
+  });
+
+  test("can claim sleeping workflow after sleepUntil time", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: { data: "test" },
+    });
+
+    // Claim and sleep the workflow
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+
+    const sleepUntil = Date.now() + 60_000;
+    await t.mutation(api.lib.sleepWorkflow, {
+      workflowId,
+      workerId: "worker-1",
+      sleepUntil,
+    });
+
+    // Advance time past sleepUntil
+    vi.advanceTimersByTime(61_000);
+
+    // Should be able to claim the sleeping workflow
+    const claimed = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-2",
+    });
+
+    expect(claimed).toBeDefined();
+    expect(claimed?.workflowId).toEqual(workflowId);
+    expect(claimed?.input).toEqual({ data: "test" });
+
+    const workflow = await t.query(api.lib.getWorkflow, { workflowId });
+    expect(workflow?.status).toEqual("running");
+    expect(workflow?.claimedBy).toEqual("worker-2");
+    expect(workflow?.sleepUntil).toBeUndefined();
+  });
+
+  test("cannot claim sleeping workflow before sleepUntil time", async () => {
+    const t = initConvexTest();
+    await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: {},
+    });
+
+    // Claim and sleep the workflow
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+
+    await t.mutation(api.lib.sleepWorkflow, {
+      workflowId: (await t.query(api.lib.listWorkflows, {}))[0]._id,
+      workerId: "worker-1",
+      sleepUntil: Date.now() + 60_000,
+    });
+
+    // Advance time but not past sleepUntil
+    vi.advanceTimersByTime(30_000);
+
+    // Should not be able to claim yet
+    const claimed = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-2",
+    });
+
+    expect(claimed).toBeNull();
+  });
+
+  test("claimAll can claim expired sleeping workflows globally", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: { data: "global" },
+    });
+
+    // Claim and sleep
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+
+    await t.mutation(api.lib.sleepWorkflow, {
+      workflowId,
+      workerId: "worker-1",
+      sleepUntil: Date.now() + 60_000,
+    });
+
+    // Advance past sleepUntil
+    vi.advanceTimersByTime(61_000);
+
+    // Claim with wildcard
+    const claimed = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["*"],
+      workerId: "worker-2",
+    });
+
+    expect(claimed).toBeDefined();
+    expect(claimed?.workflowId).toEqual(workflowId);
   });
 });

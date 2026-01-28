@@ -67,6 +67,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           error?: string;
           isNew: boolean;
           output?: any;
+          sleepUntil?: number;
           status: "pending" | "running" | "completed" | "failed";
           stepId: string;
         },
@@ -79,11 +80,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         null | {
           _creationTime: number;
           _id: string;
+          claimedBy?: string | null;
           error?: string;
           input: any;
           name: string;
           output?: any;
-          status: "pending" | "running" | "completed" | "failed";
+          sleepUntil?: number;
+          status: "pending" | "running" | "sleeping" | "completed" | "failed";
         },
         Name
       >;
@@ -116,7 +119,7 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         {
           limit?: number;
-          status?: "pending" | "running" | "completed" | "failed";
+          status?: "pending" | "running" | "sleeping" | "completed" | "failed";
         },
         Array<{
           _creationTime: number;
@@ -125,8 +128,27 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           input: any;
           name: string;
           output?: any;
-          status: "pending" | "running" | "completed" | "failed";
+          status: "pending" | "running" | "sleeping" | "completed" | "failed";
         }>,
+        Name
+      >;
+      scheduleSleep: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          sleepUntil: number;
+          stepId: string;
+          workerId: string;
+          workflowId: string;
+        },
+        boolean,
+        Name
+      >;
+      sleepWorkflow: FunctionReference<
+        "mutation",
+        "internal",
+        { sleepUntil: number; workerId: string; workflowId: string },
+        boolean,
         Name
       >;
       startWorkflow: FunctionReference<

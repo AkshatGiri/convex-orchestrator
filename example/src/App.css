@@ -36,6 +36,10 @@
   --status-failed-bg: rgba(239, 68, 68, 0.12);
   --status-failed-border: rgba(239, 68, 68, 0.3);
 
+  --status-sleeping: #a855f7;
+  --status-sleeping-bg: rgba(168, 85, 247, 0.12);
+  --status-sleeping-border: rgba(168, 85, 247, 0.3);
+
   /* Accent */
   --accent: #8b5cf6;
   --accent-hover: #a78bfa;
@@ -528,6 +532,17 @@ html, body {
 
 .status-badge.failed .status-badge-dot {
   background: var(--status-failed);
+}
+
+.status-badge.sleeping {
+  color: var(--status-sleeping);
+  background: var(--status-sleeping-bg);
+  border-color: var(--status-sleeping-border);
+}
+
+.status-badge.sleeping .status-badge-dot {
+  background: var(--status-sleeping);
+  animation: pulse 2s ease-in-out infinite;
 }
 
 /* ============================================

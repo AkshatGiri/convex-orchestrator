@@ -17,8 +17,10 @@ export const {
   completeWorkflow,
   failWorkflow,
   getOrCreateStep,
+  scheduleSleep,
   completeStep,
   failStep,
+  sleepWorkflow,
   subscribePendingWorkflows,
 } = exposeApiWithWorker(components.convexOrchestrator, {
   authorize: () => true,

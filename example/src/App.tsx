@@ -3,7 +3,12 @@ import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { useState } from "react";
 
-type WorkflowStatus = "pending" | "running" | "completed" | "failed";
+type WorkflowStatus =
+  | "pending"
+  | "running"
+  | "sleeping"
+  | "completed"
+  | "failed";
 type TabType = "steps" | "input" | "output";
 
 function StatusBadge({ status }: { status: WorkflowStatus }) {
@@ -46,10 +51,12 @@ function WorkflowDashboard() {
 
   const steps = useQuery(
     api.example.getWorkflowSteps,
-    selectedWorkflow ? { workflowId: selectedWorkflow as any } : "skip"
+    selectedWorkflow ? { workflowId: selectedWorkflow as any } : "skip",
   );
 
-  const selectedWorkflowData = workflows?.find((w) => w._id === selectedWorkflow);
+  const selectedWorkflowData = workflows?.find(
+    (w) => w._id === selectedWorkflow,
+  );
 
   const handleStartWorkflow = async (name: string, input: any) => {
     setStartingWorkflow(name);
@@ -73,6 +80,14 @@ function WorkflowDashboard() {
         { name: "Widget", price: 29.99 },
         { name: "Gadget", price: 49.99 },
       ],
+    });
+
+  const handleStartStress = () => handleStartWorkflow("stress", { count: 100 });
+
+  const handleStartReminder = () =>
+    handleStartWorkflow("reminder", {
+      message: "Time to check your workflow!",
+      delaySeconds: 10,
     });
 
   return (
@@ -110,6 +125,26 @@ function WorkflowDashboard() {
           >
             {startingWorkflow === "order" ? <span className="spinner" /> : null}
             order
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={handleStartStress}
+            disabled={startingWorkflow !== null}
+          >
+            {startingWorkflow === "stress" ? (
+              <span className="spinner" />
+            ) : null}
+            stress (100 steps)
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={handleStartReminder}
+            disabled={startingWorkflow !== null}
+          >
+            {startingWorkflow === "reminder" ? (
+              <span className="spinner" />
+            ) : null}
+            reminder (10s sleep)
           </button>
         </div>
       </div>
@@ -230,9 +265,18 @@ function WorkflowDashboard() {
                               <span className="step-number">{index + 1}</span>
                               <span className="step-name">{step.name}</span>
                             </div>
-                            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                            <div
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "12px",
+                              }}
+                            >
                               <span className="step-duration">
-                                {formatDuration(step.startedAt, step.completedAt)}
+                                {formatDuration(
+                                  step.startedAt,
+                                  step.completedAt,
+                                )}
                               </span>
                               <StatusBadge status={step.status} />
                             </div>
@@ -290,15 +334,16 @@ function WorkflowDashboard() {
                       </div>
                     </div>
                   )}
-                  {!selectedWorkflowData.output && !selectedWorkflowData.error && (
-                    <div className="empty-state">
-                      <div className="empty-state-icon">⏳</div>
-                      <div className="empty-state-title">No result yet</div>
-                      <div className="empty-state-description">
-                        The workflow is still in progress
+                  {!selectedWorkflowData.output &&
+                    !selectedWorkflowData.error && (
+                      <div className="empty-state">
+                        <div className="empty-state-icon">⏳</div>
+                        <div className="empty-state-title">No result yet</div>
+                        <div className="empty-state-description">
+                          The workflow is still in progress
+                        </div>
                       </div>
-                    </div>
-                  )}
+                    )}
                 </div>
               )}
             </div>

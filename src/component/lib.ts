@@ -44,7 +44,7 @@ export const claimWorkflow = mutation({
       workflowId: v.id("workflows"),
       name: v.string(),
       input: v.any(),
-    })
+    }),
   ),
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -74,11 +74,34 @@ export const claimWorkflow = mutation({
         };
       }
 
+      // Check for sleeping workflows that should wake up (claimAll case)
+      const sleepingGlobal = await ctx.db
+        .query("workflows")
+        .withIndex("status_sleepUntil", (q) =>
+          q.eq("status", "sleeping").lte("sleepUntil", now),
+        )
+        .first();
+
+      if (sleepingGlobal) {
+        await ctx.db.patch(sleepingGlobal._id, {
+          status: "running",
+          claimedBy: args.workerId,
+          claimedAt: now,
+          leaseExpiresAt,
+          sleepUntil: undefined,
+        });
+        return {
+          workflowId: sleepingGlobal._id,
+          name: sleepingGlobal.name,
+          input: sleepingGlobal.input,
+        };
+      }
+
       // Reclaim the most-expired lease globally.
       const expired = await ctx.db
         .query("workflows")
         .withIndex("status_leaseExpiresAt", (q) =>
-          q.eq("status", "running").lt("leaseExpiresAt", now)
+          q.eq("status", "running").lt("leaseExpiresAt", now),
         )
         .order("asc")
         .first();
@@ -131,12 +154,17 @@ export const claimWorkflow = mutation({
     for (const name of args.workflowNames) {
       const pending = await ctx.db
         .query("workflows")
-        .withIndex("name_status", (q) => q.eq("name", name).eq("status", "pending"))
+        .withIndex("name_status", (q) =>
+          q.eq("name", name).eq("status", "pending"),
+        )
         .order("asc")
         .first();
 
       if (pending) {
-        if (!oldestPending || pending._creationTime < oldestPending._creationTime) {
+        if (
+          !oldestPending ||
+          pending._creationTime < oldestPending._creationTime
+        ) {
           oldestPending = pending;
         }
       }
@@ -156,6 +184,52 @@ export const claimWorkflow = mutation({
       };
     }
 
+    // Check for sleeping workflows that should wake up (per-name case)
+    // Use an index on sleepUntil to avoid starvation (no `take(25)` scan).
+    let bestSleeping: Awaited<ReturnType<typeof ctx.db.get>> | null = null;
+
+    for (const name of args.workflowNames) {
+      const sleeping = await ctx.db
+        .query("workflows")
+        .withIndex("name_status_sleepUntil", (q) =>
+          q.eq("name", name).eq("status", "sleeping").lte("sleepUntil", now),
+        )
+        .first();
+
+      if (!sleeping) continue;
+
+      if (!bestSleeping) {
+        bestSleeping = sleeping;
+        continue;
+      }
+
+      const sleepingUntil = sleeping.sleepUntil ?? Number.POSITIVE_INFINITY;
+      const bestUntil = bestSleeping.sleepUntil ?? Number.POSITIVE_INFINITY;
+
+      if (
+        sleepingUntil < bestUntil ||
+        (sleepingUntil === bestUntil &&
+          sleeping._creationTime < bestSleeping._creationTime)
+      ) {
+        bestSleeping = sleeping;
+      }
+    }
+
+    if (bestSleeping) {
+      await ctx.db.patch(bestSleeping._id, {
+        status: "running",
+        claimedBy: args.workerId,
+        claimedAt: now,
+        leaseExpiresAt,
+        sleepUntil: undefined,
+      });
+      return {
+        workflowId: bestSleeping._id,
+        name: bestSleeping.name,
+        input: bestSleeping.input,
+      };
+    }
+
     // Check for abandoned workflows (claimed but timed out) - oldest first globally
     let oldestExpired: Awaited<ReturnType<typeof ctx.db.get>> | null = null;
 
@@ -163,16 +237,16 @@ export const claimWorkflow = mutation({
       const expired = await ctx.db
         .query("workflows")
         .withIndex("name_status_leaseExpiresAt", (q) =>
-          q
-            .eq("name", name)
-            .eq("status", "running")
-            .lt("leaseExpiresAt", now)
+          q.eq("name", name).eq("status", "running").lt("leaseExpiresAt", now),
         )
         .order("asc")
         .first();
 
       if (expired) {
-        if (!oldestExpired || expired._creationTime < oldestExpired._creationTime) {
+        if (
+          !oldestExpired ||
+          expired._creationTime < oldestExpired._creationTime
+        ) {
           oldestExpired = expired;
         }
       }
@@ -197,7 +271,9 @@ export const claimWorkflow = mutation({
     for (const name of args.workflowNames) {
       const legacyRunning = await ctx.db
         .query("workflows")
-        .withIndex("name_status", (q) => q.eq("name", name).eq("status", "running"))
+        .withIndex("name_status", (q) =>
+          q.eq("name", name).eq("status", "running"),
+        )
         .order("asc")
         .take(25);
 
@@ -207,7 +283,10 @@ export const claimWorkflow = mutation({
           workflow.claimedAt != null &&
           now - workflow.claimedAt > CLAIM_TIMEOUT_MS
         ) {
-          if (!oldestLegacy || workflow._creationTime < oldestLegacy._creationTime) {
+          if (
+            !oldestLegacy ||
+            workflow._creationTime < oldestLegacy._creationTime
+          ) {
             oldestLegacy = workflow;
           }
         }
@@ -306,6 +385,36 @@ export const failWorkflow = mutation({
 });
 
 /**
+ * Put workflow to sleep until a specific timestamp
+ */
+export const sleepWorkflow = mutation({
+  args: {
+    workflowId: v.id("workflows"),
+    workerId: v.string(),
+    sleepUntil: v.number(),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const workflow = await ctx.db.get(args.workflowId);
+    if (
+      !workflow ||
+      workflow.status !== "running" ||
+      workflow.claimedBy !== args.workerId
+    ) {
+      return false;
+    }
+    await ctx.db.patch(args.workflowId, {
+      status: "sleeping",
+      sleepUntil: args.sleepUntil,
+      claimedBy: null,
+      claimedAt: null,
+      leaseExpiresAt: null,
+    });
+    return true;
+  },
+});
+
+/**
  * Get workflow status
  */
 export const getWorkflow = query({
@@ -322,7 +431,9 @@ export const getWorkflow = query({
       input: v.any(),
       output: v.optional(v.any()),
       error: v.optional(v.string()),
-    })
+      claimedBy: v.optional(v.union(v.string(), v.null())),
+      sleepUntil: v.optional(v.number()),
+    }),
   ),
   handler: async (ctx, args) => {
     const workflow = await ctx.db.get(args.workflowId);
@@ -335,6 +446,8 @@ export const getWorkflow = query({
       input: workflow.input,
       output: workflow.output,
       error: workflow.error,
+      claimedBy: workflow.claimedBy,
+      sleepUntil: workflow.sleepUntil,
     };
   },
 });
@@ -356,7 +469,7 @@ export const listWorkflows = query({
       input: v.any(),
       output: v.optional(v.any()),
       error: v.optional(v.string()),
-    })
+    }),
   ),
   handler: async (ctx, args) => {
     const limit = args.limit ?? 100;
@@ -400,11 +513,16 @@ export const getOrCreateStep = mutation({
     status: stepStatus,
     output: v.optional(v.any()),
     error: v.optional(v.string()),
+    sleepUntil: v.optional(v.number()),
     isNew: v.boolean(),
   }),
   handler: async (ctx, args) => {
     const workflow = await ctx.db.get(args.workflowId);
-    if (!workflow || workflow.status !== "running" || workflow.claimedBy !== args.workerId) {
+    if (
+      !workflow ||
+      workflow.status !== "running" ||
+      workflow.claimedBy !== args.workerId
+    ) {
       throw new Error("Workflow not claimed by worker");
     }
 
@@ -417,6 +535,7 @@ export const getOrCreateStep = mutation({
           status: step.status,
           output: step.output,
           error: step.error,
+          sleepUntil: step.sleepUntil,
           isNew: false,
         };
       }
@@ -443,8 +562,63 @@ export const getOrCreateStep = mutation({
       status: "running" as const,
       output: undefined,
       error: undefined,
+      sleepUntil: undefined,
       isNew: true,
     };
+  },
+});
+
+/**
+ * Atomically schedule a workflow sleep and associate it with a running step.
+ *
+ * This is used by ctx.sleep()/ctx.sleepUntil() so replays can resume without
+ * re-sleeping indefinitely: the step holds the durable sleepUntil marker.
+ */
+export const scheduleSleep = mutation({
+  args: {
+    workflowId: v.id("workflows"),
+    stepId: v.id("steps"),
+    workerId: v.string(),
+    sleepUntil: v.number(),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const workflow = await ctx.db.get(args.workflowId);
+    if (
+      !workflow ||
+      workflow.status !== "running" ||
+      workflow.claimedBy !== args.workerId
+    ) {
+      return false;
+    }
+
+    const step = await ctx.db.get(args.stepId);
+    if (
+      !step ||
+      step.workflowId !== args.workflowId ||
+      step.status !== "running"
+    ) {
+      return false;
+    }
+
+    const chosenSleepUntil = step.sleepUntil ?? args.sleepUntil;
+    if (chosenSleepUntil <= Date.now()) {
+      // No need to sleep; caller should complete the marker step instead.
+      return false;
+    }
+
+    if (step.sleepUntil == null) {
+      await ctx.db.patch(step._id, { sleepUntil: chosenSleepUntil });
+    }
+
+    await ctx.db.patch(args.workflowId, {
+      status: "sleeping",
+      sleepUntil: chosenSleepUntil,
+      claimedBy: null,
+      claimedAt: null,
+      leaseExpiresAt: null,
+    });
+    return true;
   },
 });
 
@@ -464,12 +638,17 @@ export const completeStep = mutation({
       return false;
     }
     const workflow = await ctx.db.get(step.workflowId);
-    if (!workflow || workflow.status !== "running" || workflow.claimedBy !== args.workerId) {
+    if (
+      !workflow ||
+      workflow.status !== "running" ||
+      workflow.claimedBy !== args.workerId
+    ) {
       return false;
     }
     await ctx.db.patch(args.stepId, {
       status: "completed",
       output: args.output,
+      sleepUntil: undefined,
       completedAt: Date.now(),
     });
     return true;
@@ -492,12 +671,17 @@ export const failStep = mutation({
       return false;
     }
     const workflow = await ctx.db.get(step.workflowId);
-    if (!workflow || workflow.status !== "running" || workflow.claimedBy !== args.workerId) {
+    if (
+      !workflow ||
+      workflow.status !== "running" ||
+      workflow.claimedBy !== args.workerId
+    ) {
       return false;
     }
     await ctx.db.patch(args.stepId, {
       status: "failed",
       error: args.error,
+      sleepUntil: undefined,
       completedAt: Date.now(),
     });
     return true;
@@ -522,7 +706,7 @@ export const getWorkflowSteps = query({
       attempts: v.number(),
       startedAt: v.optional(v.number()),
       completedAt: v.optional(v.number()),
-    })
+    }),
   ),
   handler: async (ctx, args) => {
     const steps = await ctx.db
@@ -550,6 +734,7 @@ export const getWorkflowSteps = query({
 
 /**
  * Subscribe to pending workflows (for workers)
+ * Also triggers when sleeping workflows are ready to wake
  */
 export const subscribePendingWorkflows = query({
   args: {
@@ -557,21 +742,50 @@ export const subscribePendingWorkflows = query({
   },
   returns: v.number(), // just return count, triggers re-subscription
   handler: async (ctx, args) => {
+    const now = Date.now();
+
     if (args.workflowNames.includes(ALL_WORKFLOWS)) {
       const pending = await ctx.db
         .query("workflows")
         .withIndex("status", (q) => q.eq("status", "pending"))
         .first();
-      return pending ? 1 : 0;
+      if (pending) return 1;
+
+      // Check for sleeping workflows ready to wake
+      const sleeping = await ctx.db
+        .query("workflows")
+        .withIndex("status_sleepUntil", (q) =>
+          q.eq("status", "sleeping").lte("sleepUntil", now),
+        )
+        .first();
+      if (sleeping) return 1;
+
+      return 0;
     }
 
     for (const name of args.workflowNames) {
       const pending = await ctx.db
         .query("workflows")
-        .withIndex("name_status", (q) => q.eq("name", name).eq("status", "pending"))
+        .withIndex("name_status", (q) =>
+          q.eq("name", name).eq("status", "pending"),
+        )
         .first();
       if (pending) return 1;
     }
+
+    // Check for sleeping workflows ready to wake (per-name)
+    for (const name of args.workflowNames) {
+      const sleeping = await ctx.db
+        .query("workflows")
+        .withIndex("name_status_sleepUntil", (q) =>
+          q.eq("name", name).eq("status", "sleeping").lte("sleepUntil", now),
+        )
+        .first();
+      if (sleeping) {
+        return 1;
+      }
+    }
+
     return 0;
   },
 });
