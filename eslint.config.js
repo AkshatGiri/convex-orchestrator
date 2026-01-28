@@ -10,6 +10,7 @@ export default [
       "dist/**",
       "example/dist/**",
       "*.config.{js,mjs,cjs,ts,tsx}",
+      "src/**/*.config.{js,mjs,cjs,ts,tsx}",
       "example/**/*.config.{js,mjs,cjs,ts,tsx}",
       "**/_generated/",
       "initTemplate.mjs",
@@ -32,6 +33,13 @@ export default [
   },
   pluginJs.configs.recommended,
   ...tseslint.configs.recommended,
+  // Node scripts
+  {
+    files: ["scripts/**/*.{js,mjs,cjs,ts,tsx}"],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
   // Convex code - Worker environment
   {
     files: ["src/**/*.{ts,tsx}", "example/convex/**/*.{ts,tsx}"],
