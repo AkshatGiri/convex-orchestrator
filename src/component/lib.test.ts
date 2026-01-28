@@ -47,6 +47,84 @@ describe("orchestrator component", () => {
     expect(workflow?.status).toEqual("running");
   });
 
+  test("can wait for a signal and resume after signaled", async () => {
+    const t = initConvexTest();
+    const workflowId = await t.mutation(api.lib.startWorkflow, {
+      name: "test-workflow",
+      input: { foo: "bar" },
+    });
+
+    // Claim the workflow
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-1",
+    });
+
+    // Create the signal marker step
+    const step = await t.mutation(api.lib.getOrCreateStep, {
+      workflowId,
+      stepName: "__signal:approved:wait",
+      workerId: "worker-1",
+    });
+
+    // Wait without a signal: should park the workflow
+    const first = await t.mutation(api.lib.waitForSignal, {
+      workflowId,
+      stepId: step.stepId,
+      workerId: "worker-1",
+      signalName: "approved",
+    });
+    expect(first.kind).toEqual("waiting");
+
+    const parked = await t.query(api.lib.getWorkflow, { workflowId });
+    expect(parked?.status).toEqual("waiting");
+    expect(parked?.claimedBy).toBeNull();
+
+    // Send signal (should wake workflow to pending)
+    const ok = await t.mutation(api.lib.signalWorkflow, {
+      workflowId,
+      signal: "approved",
+      payload: { approved: true },
+    });
+    expect(ok).toBe(true);
+
+    const afterSignal = await t.query(api.lib.getWorkflow, { workflowId });
+    expect(afterSignal?.status).toEqual("pending");
+
+    // Re-claim and consume the signal
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["test-workflow"],
+      workerId: "worker-2",
+    });
+
+    const stepAgain = await t.mutation(api.lib.getOrCreateStep, {
+      workflowId,
+      stepName: "__signal:approved:wait",
+      workerId: "worker-2",
+    });
+
+    const second = await t.mutation(api.lib.waitForSignal, {
+      workflowId,
+      stepId: stepAgain.stepId,
+      workerId: "worker-2",
+      signalName: "approved",
+    });
+    expect(second.kind).toEqual("signaled");
+    if (second.kind === "signaled") {
+      expect(second.payload).toEqual({ approved: true });
+      await t.mutation(api.lib.completeStep, {
+        stepId: stepAgain.stepId,
+        workerId: "worker-2",
+        output: second.payload,
+      });
+    }
+
+    const steps = await t.query(api.lib.getWorkflowSteps, { workflowId });
+    const marker = steps.find((s) => s.name === "__signal:approved:wait");
+    expect(marker?.status).toEqual("completed");
+    expect(marker?.output).toEqual({ approved: true });
+  });
+
   test("prioritizes due sleeping workflows over pending (per-name)", async () => {
     const t = initConvexTest();
     const pendingId = await t.mutation(api.lib.startWorkflow, {

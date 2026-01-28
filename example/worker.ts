@@ -228,6 +228,47 @@ const reminderWorkflow = workflow("reminder", async (ctx, input: ReminderInput) 
   return reminder;
 });
 
+// Approval workflow demonstrating ctx.waitForSignal()
+interface ApprovalInput {
+  requestId: string;
+  requester: string;
+}
+
+const approvalWorkflow = workflow(
+  "approval",
+  async (ctx, input: ApprovalInput) => {
+    console.log(`\n📝 Starting approval workflow`);
+    console.log(`   Request: ${input.requestId}`);
+    console.log(`   Requester: ${input.requester}`);
+
+    await ctx.step("request-approval", async () => {
+      console.log(
+        `   📩 Approval requested. Send a signal: approved=true/false`,
+      );
+      return { requestedAt: new Date().toISOString() };
+    });
+
+    console.log(`   ⏳ Waiting for signal "approved"...`);
+    const decision = await ctx.waitForSignal<{ approved: boolean }>(
+      "decision",
+      "approved",
+    );
+    console.log(`   ✅ Got decision: ${JSON.stringify(decision)}`);
+
+    const result = await ctx.step("apply-decision", async () => {
+      if (!decision.approved) {
+        console.log("   ❌ Not approved");
+        return { status: "rejected" as const };
+      }
+      console.log("   🎉 Approved");
+      return { status: "approved" as const };
+    });
+
+    console.log(`✅ Approval workflow completed!`);
+    return { requestId: input.requestId, ...result };
+  },
+);
+
 // ============================================================================
 // Start the Worker
 // ============================================================================
@@ -241,7 +282,13 @@ async function main() {
 
   // Use the app's API (api.example) which wraps the component
   const worker = createWorker(client, api.example, {
-    workflows: [orderWorkflow, greetWorkflow, stressWorkflow, reminderWorkflow],
+    workflows: [
+      orderWorkflow,
+      greetWorkflow,
+      stressWorkflow,
+      reminderWorkflow,
+      approvalWorkflow,
+    ],
     pollIntervalMs: 2000,
     maxConcurrentWorkflows: WORKER_CONCURRENCY,
   });

@@ -40,6 +40,10 @@
   --status-sleeping-bg: rgba(168, 85, 247, 0.12);
   --status-sleeping-border: rgba(168, 85, 247, 0.3);
 
+  --status-waiting: #06b6d4;
+  --status-waiting-bg: rgba(6, 182, 212, 0.12);
+  --status-waiting-border: rgba(6, 182, 212, 0.3);
+
   /* Accent */
   --accent: #8b5cf6;
   --accent-hover: #a78bfa;
@@ -543,6 +547,17 @@ html, body {
 .status-badge.sleeping .status-badge-dot {
   background: var(--status-sleeping);
   animation: pulse 2s ease-in-out infinite;
+}
+
+.status-badge.waiting {
+  color: var(--status-waiting);
+  background: var(--status-waiting-bg);
+  border-color: var(--status-waiting-border);
+}
+
+.status-badge.waiting .status-badge-dot {
+  background: var(--status-waiting);
+  animation: pulse 1.75s ease-in-out infinite;
 }
 
 /* ============================================

@@ -86,7 +86,15 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           name: string;
           output?: any;
           sleepUntil?: number;
-          status: "pending" | "running" | "sleeping" | "completed" | "failed";
+          status:
+            | "pending"
+            | "running"
+            | "sleeping"
+            | "waiting"
+            | "completed"
+            | "failed";
+          waitingForSignalName?: string;
+          waitingForSignalStepId?: string;
         },
         Name
       >;
@@ -119,7 +127,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         {
           limit?: number;
-          status?: "pending" | "running" | "sleeping" | "completed" | "failed";
+          status?:
+            | "pending"
+            | "running"
+            | "sleeping"
+            | "waiting"
+            | "completed"
+            | "failed";
         },
         Array<{
           _creationTime: number;
@@ -128,7 +142,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           input: any;
           name: string;
           output?: any;
-          status: "pending" | "running" | "sleeping" | "completed" | "failed";
+          status:
+            | "pending"
+            | "running"
+            | "sleeping"
+            | "waiting"
+            | "completed"
+            | "failed";
         }>,
         Name
       >;
@@ -141,6 +161,13 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
           workerId: string;
           workflowId: string;
         },
+        boolean,
+        Name
+      >;
+      signalWorkflow: FunctionReference<
+        "mutation",
+        "internal",
+        { payload: any; signal: string; workflowId: string },
         boolean,
         Name
       >;
@@ -163,6 +190,18 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         { workflowNames: Array<string> },
         number,
+        Name
+      >;
+      waitForSignal: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          signalName: string;
+          stepId: string;
+          workerId: string;
+          workflowId: string;
+        },
+        { kind: "waiting" } | { kind: "signaled"; payload: any },
         Name
       >;
     };

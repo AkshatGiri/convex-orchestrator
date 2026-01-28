@@ -15,6 +15,7 @@ export type WorkflowStatus =
   | "pending"
   | "running"
   | "sleeping"
+  | "waiting"
   | "completed"
   | "failed";
 export type StepStatus = "pending" | "running" | "completed" | "failed";
@@ -30,6 +31,20 @@ export class WorkflowSleepError extends Error {
   }
 }
 
+/**
+ * Error thrown when a workflow is waiting for a signal.
+ * This is caught by the worker to gracefully stop execution.
+ */
+export class WorkflowWaitError extends Error {
+  constructor(
+    public readonly signalName: string,
+    public readonly marker: string,
+  ) {
+    super(`Workflow waiting for signal "${signalName}" (${marker})`);
+    this.name = "WorkflowWaitError";
+  }
+}
+
 export interface WorkflowContext<TInput> {
   input: TInput;
   workflowId: string;
@@ -42,6 +57,7 @@ export interface WorkflowContext<TInput> {
     (timestamp: number | Date): Promise<void>;
     (marker: string, timestamp: number | Date): Promise<void>;
   };
+  waitForSignal: <T = any>(marker: string, signalName: string) => Promise<T>;
 }
 
 export type WorkflowFunction<TInput, TOutput> = (
@@ -120,6 +136,12 @@ export interface OrchestratorApi {
     "public",
     { workflowId: string; stepId: string; workerId: string; sleepUntil: number },
     boolean
+  >;
+  waitForSignal: FunctionReference<
+    "mutation",
+    "public",
+    { workflowId: string; stepId: string; workerId: string; signalName: string },
+    { kind: "waiting" } | { kind: "signaled"; payload: any }
   >;
   completeStep: FunctionReference<
     "mutation",
@@ -266,6 +288,7 @@ export function createWorker(
     const claimState = { lost: false };
     let executingStepName: string | null = null;
     const sleepPrefix = "__sleep:";
+    const signalPrefix = "__signal:";
 
     // Create the context with step function and sleep functions
     const ctx: WorkflowContext<unknown> = {
@@ -429,6 +452,60 @@ export function createWorker(
         // Stop execution - workflow will be resumed later
         throw new WorkflowSleepError(sleepUntil);
       },
+      waitForSignal: async <T,>(marker: string, signalName: string) => {
+        if (executingStepName) {
+          throw new Error(
+            `ctx.waitForSignal() cannot be called inside ctx.step("${executingStepName}"). ` +
+              `Move the wait outside of ctx.step and make it its own top-level await.`,
+          );
+        }
+        if (!marker) {
+          throw new Error("ctx.waitForSignal(marker, signalName) requires a marker");
+        }
+        if (!signalName) {
+          throw new Error(
+            "ctx.waitForSignal(marker, signalName) requires a signalName",
+          );
+        }
+        if (claimState.lost) {
+          throw new Error("Workflow claim lost");
+        }
+
+        const stepName = `${signalPrefix}${signalName}:${marker}`;
+        const stepInfo = await client.mutation(orchestratorApi.getOrCreateStep, {
+          workflowId,
+          stepName,
+          workerId,
+        });
+
+        if (!stepInfo.isNew && stepInfo.status === "completed") {
+          return stepInfo.output as T;
+        }
+        if (!stepInfo.isNew && stepInfo.status === "failed") {
+          throw new Error(stepInfo.error ?? "Signal marker step failed");
+        }
+
+        const res = await client.mutation(orchestratorApi.waitForSignal, {
+          workflowId,
+          stepId: stepInfo.stepId,
+          workerId,
+          signalName,
+        });
+
+        if (res.kind === "signaled") {
+          const ok = await client.mutation(orchestratorApi.completeStep, {
+            stepId: stepInfo.stepId,
+            workerId,
+            output: res.payload,
+          });
+          if (!ok) {
+            throw new Error("Failed to record signal result (claim lost?)");
+          }
+          return res.payload as T;
+        }
+
+        throw new WorkflowWaitError(signalName, marker);
+      },
     };
 
     // Start heartbeat
@@ -477,6 +554,12 @@ export function createWorker(
       if (error instanceof WorkflowSleepError) {
         console.log(
           `Workflow ${workflowId} is sleeping until ${error.wakeTime}`,
+        );
+        return;
+      }
+      if (error instanceof WorkflowWaitError) {
+        console.log(
+          `Workflow ${workflowId} is waiting for signal ${error.signalName} (${error.marker})`,
         );
         return;
       }
@@ -733,6 +816,21 @@ export function exposeApi(component: ComponentApi) {
       },
     }),
 
+    signalWorkflow: mutationGeneric({
+      args: {
+        workflowId: v.string(),
+        signal: v.string(),
+        payload: v.any(),
+      },
+      handler: async (ctx, args) => {
+        return await ctx.runMutation(component.lib.signalWorkflow, {
+          workflowId: args.workflowId as any,
+          signal: args.signal,
+          payload: args.payload,
+        });
+      },
+    }),
+
     listWorkflows: queryGeneric({
       args: {
         status: v.optional(
@@ -740,6 +838,7 @@ export function exposeApi(component: ComponentApi) {
             v.literal("pending"),
             v.literal("running"),
             v.literal("sleeping"),
+            v.literal("waiting"),
             v.literal("completed"),
             v.literal("failed"),
           ),
@@ -882,6 +981,24 @@ export function exposeApiWithWorker(
           stepId: args.stepId as any,
           workerId: args.workerId,
           sleepUntil: args.sleepUntil,
+        });
+      },
+    }),
+
+    waitForSignal: mutationGeneric({
+      args: {
+        workflowId: v.string(),
+        stepId: v.string(),
+        workerId: v.string(),
+        signalName: v.string(),
+      },
+      handler: async (ctx, args) => {
+        await ensureAuthorized(ctx, args);
+        return await ctx.runMutation(component.lib.waitForSignal, {
+          workflowId: args.workflowId as any,
+          stepId: args.stepId as any,
+          workerId: args.workerId,
+          signalName: args.signalName,
         });
       },
     }),

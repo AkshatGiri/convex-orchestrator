@@ -415,6 +415,42 @@ export const sleepWorkflow = mutation({
 });
 
 /**
+ * Send a signal to a workflow (stored durably and can wake a waiting workflow).
+ */
+export const signalWorkflow = mutation({
+  args: {
+    workflowId: v.id("workflows"),
+    signal: v.string(),
+    payload: v.any(),
+  },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const workflow = await ctx.db.get(args.workflowId);
+    if (!workflow) return false;
+
+    await ctx.db.insert("signals", {
+      workflowId: args.workflowId,
+      name: args.signal,
+      payload: args.payload,
+      createdAt: now,
+      consumedAt: null,
+    });
+
+    if (
+      workflow.status === "waiting" &&
+      workflow.waitingForSignalName === args.signal
+    ) {
+      await ctx.db.patch(args.workflowId, {
+        status: "pending",
+      });
+    }
+
+    return true;
+  },
+});
+
+/**
  * Get workflow status
  */
 export const getWorkflow = query({
@@ -433,6 +469,8 @@ export const getWorkflow = query({
       error: v.optional(v.string()),
       claimedBy: v.optional(v.union(v.string(), v.null())),
       sleepUntil: v.optional(v.number()),
+      waitingForSignalName: v.optional(v.string()),
+      waitingForSignalStepId: v.optional(v.id("steps")),
     }),
   ),
   handler: async (ctx, args) => {
@@ -448,6 +486,8 @@ export const getWorkflow = query({
       error: workflow.error,
       claimedBy: workflow.claimedBy,
       sleepUntil: workflow.sleepUntil,
+      waitingForSignalName: workflow.waitingForSignalName,
+      waitingForSignalStepId: workflow.waitingForSignalStepId,
     };
   },
 });
@@ -619,6 +659,73 @@ export const scheduleSleep = mutation({
       leaseExpiresAt: null,
     });
     return true;
+  },
+});
+
+/**
+ * Wait for a signal. If available, returns it (and marks it consumed). If not,
+ * parks the workflow in `waiting` status and releases the claim.
+ */
+export const waitForSignal = mutation({
+  args: {
+    workflowId: v.id("workflows"),
+    stepId: v.id("steps"),
+    workerId: v.string(),
+    signalName: v.string(),
+  },
+  returns: v.union(
+    v.object({ kind: v.literal("waiting") }),
+    v.object({ kind: v.literal("signaled"), payload: v.any() }),
+  ),
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    const workflow = await ctx.db.get(args.workflowId);
+    if (
+      !workflow ||
+      workflow.status !== "running" ||
+      workflow.claimedBy !== args.workerId
+    ) {
+      return { kind: "waiting" as const };
+    }
+
+    const step = await ctx.db.get(args.stepId);
+    if (
+      !step ||
+      step.workflowId !== args.workflowId ||
+      step.status !== "running"
+    ) {
+      return { kind: "waiting" as const };
+    }
+
+    const signal = await ctx.db
+      .query("signals")
+      .withIndex("workflowId_name_consumedAt_createdAt", (q) =>
+        q
+          .eq("workflowId", args.workflowId)
+          .eq("name", args.signalName)
+          .eq("consumedAt", null),
+      )
+      .order("asc")
+      .first();
+
+    if (signal) {
+      await ctx.db.patch(signal._id, {
+        consumedAt: now,
+        consumedByStepId: args.stepId,
+      });
+      return { kind: "signaled" as const, payload: signal.payload };
+    }
+
+    await ctx.db.patch(args.workflowId, {
+      status: "waiting",
+      waitingForSignalName: args.signalName,
+      waitingForSignalStepId: args.stepId,
+      claimedBy: null,
+      claimedAt: null,
+      leaseExpiresAt: null,
+    });
+
+    return { kind: "waiting" as const };
   },
 });
 

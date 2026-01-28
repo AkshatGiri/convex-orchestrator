@@ -3,8 +3,13 @@ import { createWorker, exposeApi, exposeApiWithWorker, workflow } from "./index.
 import { anyApi, type ApiFromModules } from "convex/server";
 import { components, initConvexTest } from "./setup.test.js";
 
-export const { startWorkflow, getWorkflow, listWorkflows, getWorkflowSteps } =
-  exposeApi(components.convexOrchestrator);
+export const {
+  startWorkflow,
+  getWorkflow,
+  listWorkflows,
+  getWorkflowSteps,
+  signalWorkflow,
+} = exposeApi(components.convexOrchestrator);
 
 const unauthorizedWorkerApi = exposeApiWithWorker(components.convexOrchestrator, {
   authorize: () => false,
@@ -18,6 +23,7 @@ const testApi = (
       getWorkflow: typeof getWorkflow;
       listWorkflows: typeof listWorkflows;
       getWorkflowSteps: typeof getWorkflowSteps;
+      signalWorkflow: typeof signalWorkflow;
       unauthorizedClaimWorkflow: typeof unauthorizedClaimWorkflow;
     };
   }>
@@ -71,6 +77,7 @@ describe("client tests", () => {
     expect(apiObj.failWorkflow).toBeUndefined();
     expect(apiObj.getOrCreateStep).toBeUndefined();
     expect(apiObj.scheduleSleep).toBeUndefined();
+    expect(apiObj.waitForSignal).toBeUndefined();
     expect(apiObj.completeStep).toBeUndefined();
     expect(apiObj.failStep).toBeUndefined();
     expect(apiObj.subscribePendingWorkflows).toBeUndefined();
@@ -570,5 +577,148 @@ describe("worker unit tests", () => {
       client.mutation.mock.calls.filter((c: any[]) => c[0] === scheduleSleepRef),
     ).toHaveLength(1);
     expect(completed).toBe(true);
+  });
+
+  test("named ctx.waitForSignal resumes after signal without re-waiting", async () => {
+    const claimWorkflowRef = Symbol("claimWorkflow") as any;
+    const heartbeatRef = Symbol("heartbeat") as any;
+    const getOrCreateStepRef = Symbol("getOrCreateStep") as any;
+    const waitForSignalRef = Symbol("waitForSignal") as any;
+    const completeStepRef = Symbol("completeStep") as any;
+    const completeWorkflowRef = Symbol("completeWorkflow") as any;
+    const subscribePendingRef = Symbol("subscribePendingWorkflows") as any;
+
+    const steps = new Map<
+      string,
+      { stepId: string; status: "running" | "completed"; output?: any; isNew: boolean }
+    >();
+    let signalAvailable = false;
+    let firstClaimed = false;
+    let resumedClaimed = false;
+    let completed = false;
+
+    const client = {
+      mutation: vi.fn(async (ref: any, args: any) => {
+        if (ref === claimWorkflowRef) {
+          if (completed) return null;
+          if (!firstClaimed) {
+            firstClaimed = true;
+            return { workflowId: "wf1", name: "test", input: {} };
+          }
+          if (signalAvailable && !resumedClaimed) {
+            resumedClaimed = true;
+            return { workflowId: "wf1", name: "test", input: {} };
+          }
+          return null;
+        }
+
+        if (ref === heartbeatRef) return true;
+
+        if (ref === getOrCreateStepRef) {
+          const stepName = args.stepName as string;
+          const existing = steps.get(stepName);
+          if (existing) {
+            return {
+              stepId: existing.stepId,
+              status: existing.status,
+              output: existing.output,
+              error: undefined,
+              isNew: false,
+            };
+          }
+          const created = {
+            stepId: stepName,
+            status: "running" as const,
+            output: undefined,
+            isNew: true,
+          };
+          steps.set(stepName, created);
+          return { ...created, error: undefined };
+        }
+
+        if (ref === waitForSignalRef) {
+          if (!signalAvailable) return { kind: "waiting" as const };
+          return { kind: "signaled" as const, payload: { approved: true } };
+        }
+
+        if (ref === completeStepRef) {
+          for (const [name, step] of steps.entries()) {
+            if (step.stepId === args.stepId) {
+              steps.set(name, {
+                ...step,
+                status: "completed",
+                output: args.output,
+                isNew: false,
+              });
+            }
+          }
+          return true;
+        }
+
+        if (ref === completeWorkflowRef) {
+          completed = true;
+          return true;
+        }
+
+        throw new Error(`Unexpected mutation: ${String(ref)}`);
+      }),
+      query: vi.fn(async () => {
+        throw new Error("Unexpected query");
+      }),
+      onUpdate: vi.fn((_ref: any, _args: any, _cb: any) => {
+        return () => {};
+      }),
+    };
+
+    const orchestratorApi: any = {
+      startWorkflow: Symbol("startWorkflow") as any,
+      claimWorkflow: claimWorkflowRef,
+      heartbeat: heartbeatRef,
+      completeWorkflow: completeWorkflowRef,
+      failWorkflow: Symbol("failWorkflow") as any,
+      getOrCreateStep: getOrCreateStepRef,
+      scheduleSleep: Symbol("scheduleSleep") as any,
+      waitForSignal: waitForSignalRef,
+      completeStep: completeStepRef,
+      failStep: Symbol("failStep") as any,
+      sleepWorkflow: Symbol("sleepWorkflow") as any,
+      getWorkflow: Symbol("getWorkflow") as any,
+      subscribePendingWorkflows: subscribePendingRef,
+    };
+
+    const wf = workflow("test", async (ctx) => {
+      const decision = await ctx.waitForSignal<{ approved: boolean }>(
+        "decision",
+        "approved",
+      );
+      await ctx.step("after", () => (decision.approved ? "ok" : "no"));
+      return "done";
+    });
+
+    const worker = createWorker(client as any, orchestratorApi, {
+      workflows: [wf],
+      pollIntervalMs: 1000,
+    });
+
+    await worker.start();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // First run should park waiting.
+    expect(signalAvailable).toBe(false);
+    expect(completed).toBe(false);
+
+    // Now "send" the signal and advance time to trigger another claim.
+    signalAvailable = true;
+    await vi.advanceTimersByTimeAsync(1000);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    worker.stop();
+
+    expect(completed).toBe(true);
+    expect(
+      client.mutation.mock.calls.filter((c: any[]) => c[0] === waitForSignalRef),
+    ).toHaveLength(2);
   });
 });

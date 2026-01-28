@@ -40,8 +40,13 @@ import { components } from "./_generated/api.js";
 import { exposeApi, exposeApiWithWorker } from "@akshatgiri/convex-orchestrator";
 
 // Safe to expose to clients (dashboard + starters)
-export const { startWorkflow, getWorkflow, listWorkflows, getWorkflowSteps } =
-  exposeApi(components.convexOrchestrator);
+export const {
+  startWorkflow,
+  getWorkflow,
+  listWorkflows,
+  getWorkflowSteps,
+  signalWorkflow,
+} = exposeApi(components.convexOrchestrator);
 
 // Worker operations (DO NOT expose without auth in production)
 export const {
@@ -51,6 +56,7 @@ export const {
   failWorkflow,
   getOrCreateStep,
   scheduleSleep,
+  waitForSignal,
   completeStep,
   failStep,
   subscribePendingWorkflows,
@@ -84,7 +90,10 @@ import { api } from "./convex/_generated/api.js";
 
 const client = new ConvexClient(process.env.CONVEX_URL!);
 
-const worker = createWorker(client, api.orchestrator, { workflows: [greet] });
+const worker = createWorker(client, api.orchestrator, {
+  workflows: [greet],
+  maxConcurrentWorkflows: 4,
+});
 await worker.start();
 ```
 
@@ -104,6 +113,7 @@ await client.mutation(api.orchestrator.startWorkflow, {
 - `ctx.step("name", fn)` is durable: the first successful result is stored and returned on replay.
 - `ctx.sleep("marker", durationMs)` / `ctx.sleepUntil("marker", timestamp)` are durable and replay-safe (the marker is persisted).
 - `ctx.sleep*` is **not allowed** inside `ctx.step` callbacks.
+- `await ctx.waitForSignal("marker", "signalName")` parks the workflow until `signalWorkflow(...)` is called and is replay-safe.
 - Steps are **at-least-once** from the perspective of your side effects. Make your step code idempotent.
 - Workers hold a **lease** and heartbeat while executing. If the lease expires, another worker may reclaim the workflow; the original worker should stop writing results.
 
@@ -124,6 +134,33 @@ const reminder = workflow("reminder", async (ctx, input: { email: string }) => {
 
 The marker must be stable/deterministic across replays (e.g. a literal string for that sleep site).
 
+## Signals
+
+```ts
+const approval = workflow("approval", async (ctx) => {
+  await ctx.step("request-approval", () => activities.sendApprovalEmail());
+
+  const decision = await ctx.waitForSignal<{ approved: boolean }>(
+    "approval-decision",
+    "approved",
+  );
+
+  if (decision.approved) {
+    await ctx.step("provision", () => activities.provisionAccess());
+  }
+});
+```
+
+Send the signal from your app (auth it appropriately):
+
+```ts
+await client.mutation(api.orchestrator.signalWorkflow, {
+  workflowId,
+  signal: "approved",
+  payload: { approved: true },
+});
+```
+
 ## Demo (this repo)
 
 ```sh
@@ -140,8 +177,6 @@ bun example/trigger.ts greet
 
 ## Limitations / TODOs
 
-- No signals yet (external events to wake/satisfy a workflow)
-- No worker concurrency controls yet (e.g. run N workflows concurrently per worker process)
 - No cancellations/terminations yet (cancel a workflow run, cancel a sleep, etc.)
 - No parallel DAG execution or retries/backoff yet
 - No built-in worker authentication/authorization (you must enforce this in your app)

@@ -5,6 +5,7 @@ export const workflowStatus = v.union(
   v.literal("pending"),
   v.literal("running"),
   v.literal("sleeping"),
+  v.literal("waiting"),
   v.literal("completed"),
   v.literal("failed"),
 );
@@ -31,6 +32,9 @@ export default defineSchema({
     stepIdsByName: v.optional(v.record(v.string(), v.id("steps"))),
     // When the workflow should wake up from sleeping state
     sleepUntil: v.optional(v.number()),
+    // When waiting on a signal via ctx.waitForSignal(...)
+    waitingForSignalName: v.optional(v.string()),
+    waitingForSignalStepId: v.optional(v.id("steps")),
   })
     .index("status", ["status"])
     .index("status_leaseExpiresAt", ["status", "leaseExpiresAt"])
@@ -54,4 +58,21 @@ export default defineSchema({
   })
     .index("workflowId", ["workflowId"])
     .index("workflowId_name", ["workflowId", "name"]),
+
+  // Signal inbox for workflows (ctx.waitForSignal / signalWorkflow)
+  signals: defineTable({
+    workflowId: v.id("workflows"),
+    name: v.string(),
+    payload: v.any(),
+    createdAt: v.number(),
+    consumedAt: v.union(v.number(), v.null()),
+    consumedByStepId: v.optional(v.id("steps")),
+  })
+    .index("workflowId", ["workflowId"])
+    .index("workflowId_name_consumedAt_createdAt", [
+      "workflowId",
+      "name",
+      "consumedAt",
+      "createdAt",
+    ]),
 });

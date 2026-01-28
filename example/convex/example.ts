@@ -8,6 +8,7 @@ export const {
   getWorkflow,
   listWorkflows,
   getWorkflowSteps,
+  signalWorkflow,
 } = exposeApi(components.convexOrchestrator);
 
 export const {
@@ -18,6 +19,7 @@ export const {
   failWorkflow,
   getOrCreateStep,
   scheduleSleep,
+  waitForSignal,
   completeStep,
   failStep,
   sleepWorkflow,

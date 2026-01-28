@@ -3,10 +3,14 @@
  *
  * This script demonstrates how to start workflows from any client.
  * Run with: bun example/trigger.ts [workflow-name]
+ * Or send a signal: bun example/trigger.ts signal <workflowId> <signalName> <jsonPayload>
  *
  * Examples:
  *   bun example/trigger.ts greet
  *   bun example/trigger.ts order
+ *   bun example/trigger.ts approval
+ *
+ *   bun example/trigger.ts signal <workflowId> approved '{"approved":true}'
  */
 
 import { ConvexClient } from "convex/browser";
@@ -19,12 +23,48 @@ if (!CONVEX_URL) {
 }
 
 async function main() {
-  const workflowName = process.argv[2] || "greet";
+  const command = process.argv[2] || "greet";
 
   console.log("🔌 Connecting to Convex...");
   const client = new ConvexClient(CONVEX_URL);
   await sleep(1000);
 
+  if (command === "signal") {
+    const workflowId = process.argv[3];
+    const signalName = process.argv[4];
+    const payloadRaw = process.argv[5] ?? "null";
+
+    if (!workflowId || !signalName) {
+      console.error(
+        `Usage: bun example/trigger.ts signal <workflowId> <signalName> <jsonPayload>`,
+      );
+      process.exit(1);
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(payloadRaw);
+    } catch (e) {
+      console.error(`Invalid JSON payload: ${payloadRaw}`);
+      throw e;
+    }
+
+    const ok = await client.mutation(api.example.signalWorkflow, {
+      workflowId,
+      signal: signalName,
+      payload,
+    });
+
+    console.log(
+      ok
+        ? `✅ Sent signal "${signalName}" to ${workflowId}`
+        : `❌ Failed to send signal "${signalName}" to ${workflowId}`,
+    );
+    client.close();
+    return;
+  }
+
+  const workflowName = command;
   console.log(`\n🚀 Starting "${workflowName}" workflow...`);
 
   let input: unknown;
@@ -40,6 +80,12 @@ async function main() {
           { name: "Widget", price: 29.99 },
           { name: "Gadget", price: 49.99 },
         ],
+      };
+      break;
+    case "approval":
+      input = {
+        requestId: `req_${Date.now()}`,
+        requester: "demo@example.com",
       };
       break;
     default:
@@ -80,6 +126,11 @@ async function main() {
     }
 
     console.log(`   Status: ${workflow.status}...`);
+    if (workflow.status === "waiting") {
+      console.log(
+        `   Waiting for signal. Send one with: bun example/trigger.ts signal ${workflowId} approved '{"approved":true}'`,
+      );
+    }
     await sleep(1000);
   }
 

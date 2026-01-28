@@ -7,6 +7,7 @@ type WorkflowStatus =
   | "pending"
   | "running"
   | "sleeping"
+  | "waiting"
   | "completed"
   | "failed";
 type TabType = "steps" | "input" | "output";
@@ -45,17 +46,19 @@ function formatDuration(start?: number, end?: number): string {
 function WorkflowDashboard() {
   const workflows = useQuery(api.example.listWorkflows, { limit: 50 });
   const startWorkflow = useMutation(api.example.startWorkflow);
+  const signalWorkflow = useMutation(api.example.signalWorkflow);
   const [selectedWorkflow, setSelectedWorkflow] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabType>("steps");
   const [startingWorkflow, setStartingWorkflow] = useState<string | null>(null);
 
-  const steps = useQuery(
-    api.example.getWorkflowSteps,
+  const selectedWorkflowData = useQuery(
+    api.example.getWorkflow,
     selectedWorkflow ? { workflowId: selectedWorkflow as any } : "skip",
   );
 
-  const selectedWorkflowData = workflows?.find(
-    (w) => w._id === selectedWorkflow,
+  const steps = useQuery(
+    api.example.getWorkflowSteps,
+    selectedWorkflow ? { workflowId: selectedWorkflow as any } : "skip",
   );
 
   const handleStartWorkflow = async (name: string, input: any) => {
@@ -89,6 +92,21 @@ function WorkflowDashboard() {
       message: "Time to check your workflow!",
       delaySeconds: 10,
     });
+
+  const handleStartApproval = () =>
+    handleStartWorkflow("approval", {
+      requestId: `req_${Date.now()}`,
+      requester: "demo@example.com",
+    });
+
+  const handleSendApprovedSignal = async (approved: boolean) => {
+    if (!selectedWorkflow) return;
+    await signalWorkflow({
+      workflowId: selectedWorkflow,
+      signal: "approved",
+      payload: { approved },
+    });
+  };
 
   return (
     <div className="app">
@@ -145,6 +163,16 @@ function WorkflowDashboard() {
               <span className="spinner" />
             ) : null}
             reminder (10s sleep)
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={handleStartApproval}
+            disabled={startingWorkflow !== null}
+          >
+            {startingWorkflow === "approval" ? (
+              <span className="spinner" />
+            ) : null}
+            approval (signal)
           </button>
         </div>
       </div>
@@ -221,6 +249,46 @@ function WorkflowDashboard() {
                   </span>
                 </div>
               </div>
+
+              {selectedWorkflowData.status === "waiting" ? (
+                <div className="steps-panel">
+                  <div className="data-section">
+                    <div className="data-label">Waiting for signal</div>
+                    <div className="data-content">
+                      <pre>
+                        {JSON.stringify(
+                          {
+                            signal: selectedWorkflowData.waitingForSignalName,
+                          },
+                          null,
+                          2,
+                        )}
+                      </pre>
+                      <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+                        <button
+                          className="btn btn-primary"
+                          onClick={() => handleSendApprovedSignal(true)}
+                        >
+                          Send approved=true
+                        </button>
+                        <button
+                          className="btn btn-secondary"
+                          onClick={() => handleSendApprovedSignal(false)}
+                        >
+                          Send approved=false
+                        </button>
+                      </div>
+                      <div style={{ marginTop: 12, color: "var(--text-tertiary)" }}>
+                        Or via CLI:{" "}
+                        <code>
+                          bun example/trigger.ts signal {selectedWorkflowData._id}{" "}
+                          approved {"'{\"approved\":true}'"}
+                        </code>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
 
               {/* Tabs */}
               <div className="tabs">
