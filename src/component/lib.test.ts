@@ -47,6 +47,75 @@ describe("orchestrator component", () => {
     expect(workflow?.status).toEqual("running");
   });
 
+  test("prioritizes due sleeping workflows over pending (per-name)", async () => {
+    const t = initConvexTest();
+    const pendingId = await t.mutation(api.lib.startWorkflow, {
+      name: "pending-workflow",
+      input: { kind: "pending" },
+    });
+
+    vi.advanceTimersByTime(1000);
+
+    const sleepId = await t.mutation(api.lib.startWorkflow, {
+      name: "sleep-workflow",
+      input: { kind: "sleep" },
+    });
+
+    // Claim + sleep the sleep-workflow so it's due immediately.
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["sleep-workflow"],
+      workerId: "worker-1",
+    });
+    await t.mutation(api.lib.sleepWorkflow, {
+      workflowId: sleepId,
+      workerId: "worker-1",
+      sleepUntil: Date.now(),
+    });
+
+    const claimed = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["pending-workflow", "sleep-workflow"],
+      workerId: "worker-2",
+    });
+
+    expect(claimed?.workflowId).toEqual(sleepId);
+
+    // Pending should still be pending.
+    const pending = await t.query(api.lib.getWorkflow, { workflowId: pendingId });
+    expect(pending?.status).toEqual("pending");
+  });
+
+  test("prioritizes due sleeping workflows over pending (claimAll)", async () => {
+    const t = initConvexTest();
+    await t.mutation(api.lib.startWorkflow, {
+      name: "pending-workflow",
+      input: { kind: "pending" },
+    });
+
+    vi.advanceTimersByTime(1000);
+
+    const sleepId = await t.mutation(api.lib.startWorkflow, {
+      name: "sleep-workflow",
+      input: { kind: "sleep" },
+    });
+
+    await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["sleep-workflow"],
+      workerId: "worker-1",
+    });
+    await t.mutation(api.lib.sleepWorkflow, {
+      workflowId: sleepId,
+      workerId: "worker-1",
+      sleepUntil: Date.now(),
+    });
+
+    const claimed = await t.mutation(api.lib.claimWorkflow, {
+      workflowNames: ["*"],
+      workerId: "worker-2",
+    });
+
+    expect(claimed?.workflowId).toEqual(sleepId);
+  });
+
   test("can create and complete steps", async () => {
     const t = initConvexTest();
     const workflowId = await t.mutation(api.lib.startWorkflow, {

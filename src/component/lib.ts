@@ -53,28 +53,7 @@ export const claimWorkflow = mutation({
     const claimAll = args.workflowNames.includes(ALL_WORKFLOWS);
 
     if (claimAll) {
-      // Claim the oldest pending workflow globally (FIFO).
-      const pending = await ctx.db
-        .query("workflows")
-        .withIndex("status", (q) => q.eq("status", "pending"))
-        .order("asc")
-        .first();
-
-      if (pending) {
-        await ctx.db.patch(pending._id, {
-          status: "running",
-          claimedBy: args.workerId,
-          claimedAt: now,
-          leaseExpiresAt,
-        });
-        return {
-          workflowId: pending._id,
-          name: pending.name,
-          input: pending.input,
-        };
-      }
-
-      // Check for sleeping workflows that should wake up (claimAll case)
+      // Prefer waking due sleeping workflows first so timers aren't delayed.
       const sleepingGlobal = await ctx.db
         .query("workflows")
         .withIndex("status_sleepUntil", (q) =>
@@ -94,6 +73,27 @@ export const claimWorkflow = mutation({
           workflowId: sleepingGlobal._id,
           name: sleepingGlobal.name,
           input: sleepingGlobal.input,
+        };
+      }
+
+      // Then claim the oldest pending workflow globally (FIFO).
+      const pending = await ctx.db
+        .query("workflows")
+        .withIndex("status", (q) => q.eq("status", "pending"))
+        .order("asc")
+        .first();
+
+      if (pending) {
+        await ctx.db.patch(pending._id, {
+          status: "running",
+          claimedBy: args.workerId,
+          claimedAt: now,
+          leaseExpiresAt,
+        });
+        return {
+          workflowId: pending._id,
+          name: pending.name,
+          input: pending.input,
         };
       }
 
@@ -147,44 +147,7 @@ export const claimWorkflow = mutation({
       return null;
     }
 
-    // First, try to find a pending workflow (oldest first - global FIFO across requested names)
-    // Query each name and find the globally oldest pending workflow
-    let oldestPending: Awaited<ReturnType<typeof ctx.db.get>> | null = null;
-
-    for (const name of args.workflowNames) {
-      const pending = await ctx.db
-        .query("workflows")
-        .withIndex("name_status", (q) =>
-          q.eq("name", name).eq("status", "pending"),
-        )
-        .order("asc")
-        .first();
-
-      if (pending) {
-        if (
-          !oldestPending ||
-          pending._creationTime < oldestPending._creationTime
-        ) {
-          oldestPending = pending;
-        }
-      }
-    }
-
-    if (oldestPending) {
-      await ctx.db.patch(oldestPending._id, {
-        status: "running",
-        claimedBy: args.workerId,
-        claimedAt: now,
-        leaseExpiresAt,
-      });
-      return {
-        workflowId: oldestPending._id,
-        name: oldestPending.name,
-        input: oldestPending.input,
-      };
-    }
-
-    // Check for sleeping workflows that should wake up (per-name case)
+    // Prefer waking due sleeping workflows first so timers aren't delayed.
     // Use an index on sleepUntil to avoid starvation (no `take(25)` scan).
     let bestSleeping: Awaited<ReturnType<typeof ctx.db.get>> | null = null;
 
@@ -227,6 +190,43 @@ export const claimWorkflow = mutation({
         workflowId: bestSleeping._id,
         name: bestSleeping.name,
         input: bestSleeping.input,
+      };
+    }
+
+    // Then try to find a pending workflow (oldest first - global FIFO across requested names).
+    // Query each name and find the globally oldest pending workflow.
+    let oldestPending: Awaited<ReturnType<typeof ctx.db.get>> | null = null;
+
+    for (const name of args.workflowNames) {
+      const pending = await ctx.db
+        .query("workflows")
+        .withIndex("name_status", (q) =>
+          q.eq("name", name).eq("status", "pending"),
+        )
+        .order("asc")
+        .first();
+
+      if (pending) {
+        if (
+          !oldestPending ||
+          pending._creationTime < oldestPending._creationTime
+        ) {
+          oldestPending = pending;
+        }
+      }
+    }
+
+    if (oldestPending) {
+      await ctx.db.patch(oldestPending._id, {
+        status: "running",
+        claimedBy: args.workerId,
+        claimedAt: now,
+        leaseExpiresAt,
+      });
+      return {
+        workflowId: oldestPending._id,
+        name: oldestPending.name,
+        input: oldestPending.input,
       };
     }
 
