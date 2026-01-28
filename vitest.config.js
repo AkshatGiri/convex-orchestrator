@@ -6,5 +6,7 @@ export default defineConfig({
     typecheck: {
       tsconfig: "./tsconfig.test.json",
     },
+    pool: "forks",
+    isolate: false,
   },
 });
