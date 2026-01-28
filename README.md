@@ -177,9 +177,13 @@ bun example/trigger.ts greet
 
 ## Limitations / TODOs
 
-- No cancellations/terminations yet (cancel a workflow run, cancel a sleep, etc.)
-- No parallel DAG execution or retries/backoff yet
+- No cancellations/terminations yet (cancel a workflow run, cancel a sleep, cancel waitForSignal, etc.)
+- No retries/backoff yet (step-level retry policy, transient vs permanent failures, jitter)
+- No workflow versioning yet (pin long-lived runs to a workflow build/version; safe schema evolution for step outputs)
+- Signals need more semantics (timeouts, buffering/multiple signals, retention/GC for the signal inbox)
 - No built-in worker authentication/authorization (you must enforce this in your app)
+- Observability is minimal (no structured logs/metrics/tracing yet)
+- Production hardening still needed (rate limiting/backpressure for high worker concurrency, idempotency patterns for side effects)
 
 ## Contributing
 
