@@ -19,6 +19,14 @@ if (!CONVEX_URL) {
   process.exit(1);
 }
 
+const WORKER_CONCURRENCY_RAW = process.env.WORKER_CONCURRENCY;
+const WORKER_CONCURRENCY = (() => {
+  if (!WORKER_CONCURRENCY_RAW) return 4;
+  const n = Number.parseInt(WORKER_CONCURRENCY_RAW, 10);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return n;
+})();
+
 // ============================================================================
 // Define Activities (the actual work that runs on your machine)
 // ============================================================================
@@ -235,6 +243,7 @@ async function main() {
   const worker = createWorker(client, api.example, {
     workflows: [orderWorkflow, greetWorkflow, stressWorkflow, reminderWorkflow],
     pollIntervalMs: 2000,
+    maxConcurrentWorkflows: WORKER_CONCURRENCY,
   });
 
   console.log("\n📋 Starting worker...");

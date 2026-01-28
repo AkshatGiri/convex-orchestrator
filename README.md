@@ -140,7 +140,10 @@ bun example/trigger.ts greet
 
 ## Limitations / TODOs
 
-- No signals, parallel DAG execution, or retries/backoff yet
+- No signals yet (external events to wake/satisfy a workflow)
+- No worker concurrency controls yet (e.g. run N workflows concurrently per worker process)
+- No cancellations/terminations yet (cancel a workflow run, cancel a sleep, etc.)
+- No parallel DAG execution or retries/backoff yet
 - No built-in worker authentication/authorization (you must enforce this in your app)
 
 ## Contributing

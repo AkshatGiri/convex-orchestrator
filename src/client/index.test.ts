@@ -149,6 +149,96 @@ describe("worker unit tests", () => {
     worker.stop();
   });
 
+  test("maxConcurrentWorkflows claims and executes workflows concurrently", async () => {
+    const claimWorkflowRef = Symbol("claimWorkflow") as any;
+    const heartbeatRef = Symbol("heartbeat") as any;
+    const completeWorkflowRef = Symbol("completeWorkflow") as any;
+    const subscribePendingRef = Symbol("subscribePendingWorkflows") as any;
+
+    const deferred: Record<string, { promise: Promise<void>; resolve: () => void }> =
+      {};
+    for (const id of ["wf1", "wf2"]) {
+      let resolve!: () => void;
+      const promise = new Promise<void>((r) => (resolve = r));
+      deferred[id] = { promise, resolve };
+    }
+
+    const started: string[] = [];
+    const finished: string[] = [];
+
+    const claimedQueue = [
+      { workflowId: "wf1", name: "test", input: { id: "wf1" } },
+      { workflowId: "wf2", name: "test", input: { id: "wf2" } },
+    ];
+
+    const client = {
+      mutation: vi.fn(async (ref: any, args: any) => {
+        if (ref === claimWorkflowRef) {
+          return claimedQueue.shift() ?? null;
+        }
+        if (ref === heartbeatRef) return true;
+        if (ref === completeWorkflowRef) return true;
+        throw new Error(
+          `Unexpected mutation: ${String(ref)} ${JSON.stringify(args)}`,
+        );
+      }),
+      query: vi.fn(async () => {
+        throw new Error("Unexpected query");
+      }),
+      onUpdate: vi.fn((_ref: any, _args: any, _cb: any) => {
+        return () => {};
+      }),
+    };
+
+    const orchestratorApi: any = {
+      startWorkflow: Symbol("startWorkflow") as any,
+      claimWorkflow: claimWorkflowRef,
+      heartbeat: heartbeatRef,
+      completeWorkflow: completeWorkflowRef,
+      failWorkflow: Symbol("failWorkflow") as any,
+      getOrCreateStep: Symbol("getOrCreateStep") as any,
+      scheduleSleep: Symbol("scheduleSleep") as any,
+      completeStep: Symbol("completeStep") as any,
+      failStep: Symbol("failStep") as any,
+      sleepWorkflow: Symbol("sleepWorkflow") as any,
+      getWorkflow: Symbol("getWorkflow") as any,
+      subscribePendingWorkflows: subscribePendingRef,
+    };
+
+    const wf = workflow("test", async (_ctx, input: any) => {
+      const id = input.id as string;
+      started.push(id);
+      await deferred[id].promise;
+      finished.push(id);
+      return "ok";
+    });
+
+    const worker = createWorker(client as any, orchestratorApi, {
+      workflows: [wf],
+      pollIntervalMs: 1000,
+      maxConcurrentWorkflows: 2,
+    });
+
+    await worker.start();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Both should have started without waiting for the first to finish.
+    expect(started.sort()).toEqual(["wf1", "wf2"]);
+    expect(finished).toEqual([]);
+
+    // Now release both.
+    deferred.wf1.resolve();
+    deferred.wf2.resolve();
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    worker.stop();
+
+    expect(finished.sort()).toEqual(["wf1", "wf2"]);
+  });
+
   test("worker stops writing results after claim is lost", async () => {
     const claimWorkflowRef = Symbol("claimWorkflow") as any;
     const heartbeatRef = Symbol("heartbeat") as any;

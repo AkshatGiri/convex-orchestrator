@@ -167,6 +167,11 @@ export interface WorkerOptions {
   workflows: WorkflowDefinition<any, any>[];
   pollIntervalMs?: number;
   /**
+   * Max number of workflows to execute concurrently within a single worker
+   * process. Defaults to 1.
+   */
+  maxConcurrentWorkflows?: number;
+  /**
    * If true, the worker will claim workflows globally (FIFO) by passing `["*"]`
    * to the backend. This avoids per-name queries but may claim workflows you
    * haven't registered.
@@ -232,6 +237,7 @@ export function createWorker(
   const workflows = new Map<string, WorkflowDefinition>();
   const pollIntervalMs = options.pollIntervalMs ?? 1000;
   const claimAllWorkflows = options.claimAllWorkflows ?? false;
+  const maxConcurrentWorkflows = options.maxConcurrentWorkflows ?? 1;
 
   for (const wf of options.workflows) {
     workflows.set(wf.name, wf);
@@ -241,6 +247,7 @@ export function createWorker(
   let unsubscribe: (() => void) | null = null;
   let pollLoopRunning = false;
   let wakePoll: (() => void) | null = null;
+  const inFlight = new Set<Promise<void>>();
 
   const workflowNames = Array.from(workflows.keys());
   const workflowNamesForClaim = claimAllWorkflows ? ["*"] : workflowNames;
@@ -499,27 +506,44 @@ export function createWorker(
     void pollLoop();
   }
 
+  function startInFlight(
+    workflowId: string,
+    workflowName: string,
+    input: unknown,
+  ) {
+    const p = (async () => {
+      await executeWorkflow(workflowId, workflowName, input);
+    })();
+    inFlight.add(p);
+    void p.finally(() => {
+      inFlight.delete(p);
+      // If we're still running and we freed capacity, try to claim more.
+      triggerPoll();
+    });
+  }
+
   async function pollLoop() {
     if (pollLoopRunning) return;
     pollLoopRunning = true;
     try {
       while (running) {
         try {
-          const claimed = await client.mutation(orchestratorApi.claimWorkflow, {
-            workflowNames: workflowNamesForClaim,
-            workerId,
-          });
+          // Fill available capacity.
+          while (running && inFlight.size < maxConcurrentWorkflows) {
+            const claimed = await client.mutation(
+              orchestratorApi.claimWorkflow,
+              {
+                workflowNames: workflowNamesForClaim,
+                workerId,
+              },
+            );
 
-          if (claimed) {
+            if (!claimed) break;
+
             console.log(
               `Claimed workflow: ${claimed.workflowId} (${claimed.name})`,
             );
-            await executeWorkflow(
-              claimed.workflowId,
-              claimed.name,
-              claimed.input,
-            );
-            continue;
+            startInFlight(claimed.workflowId, claimed.name, claimed.input);
           }
         } catch (error) {
           console.error("Error polling for workflows:", error);
