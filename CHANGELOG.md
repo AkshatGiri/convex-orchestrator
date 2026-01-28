@@ -1,5 +1,14 @@
 # Changelog1
 
+## 0.1.4
+
+Adding ctx.sleep and ctx.sleepUntil api to put workflows to sleep. \
+\
+Ading concurrency to workers so they can handle multiple workflows at once. \
+\
+Adding signal primitive to pause workflows until a signal is externally
+triggered.
+
 ## 0.1.3
 
 Fixing workflow processing fifo logic. Now the worker picks the oldest workflow
