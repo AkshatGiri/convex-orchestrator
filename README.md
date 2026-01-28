@@ -50,6 +50,7 @@ export const {
   completeWorkflow,
   failWorkflow,
   getOrCreateStep,
+  scheduleSleep,
   completeStep,
   failStep,
   subscribePendingWorkflows,
@@ -101,8 +102,27 @@ await client.mutation(api.orchestrator.startWorkflow, {
 ## Execution model (important)
 
 - `ctx.step("name", fn)` is durable: the first successful result is stored and returned on replay.
+- `ctx.sleep("marker", durationMs)` / `ctx.sleepUntil("marker", timestamp)` are durable and replay-safe (the marker is persisted).
+- `ctx.sleep*` is **not allowed** inside `ctx.step` callbacks.
 - Steps are **at-least-once** from the perspective of your side effects. Make your step code idempotent.
 - Workers hold a **lease** and heartbeat while executing. If the lease expires, another worker may reclaim the workflow; the original worker should stop writing results.
+
+## Durable sleep / timers
+
+Workflows replay from the top on resume, so sleep must have a durable marker to avoid re-sleeping forever.
+
+```ts
+const reminder = workflow("reminder", async (ctx, input: { email: string }) => {
+  await ctx.step("send-welcome", () => activities.sendEmail(input.email, "Welcome!"));
+
+  // Replay-safe: uses the marker to persist sleepUntil durably.
+  await ctx.sleep("followup-delay", 24 * 60 * 60 * 1000);
+
+  await ctx.step("send-followup", () => activities.sendEmail(input.email, "How's it going?"));
+});
+```
+
+The marker must be stable/deterministic across replays (e.g. a literal string for that sleep site).
 
 ## Demo (this repo)
 
@@ -120,7 +140,7 @@ bun example/trigger.ts greet
 
 ## Limitations / TODOs
 
-- No durable timers/sleep, signals, parallel DAG execution, or retries/backoff yet
+- No signals, parallel DAG execution, or retries/backoff yet
 - No built-in worker authentication/authorization (you must enforce this in your app)
 
 ## Contributing
